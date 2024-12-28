@@ -1,0 +1,301 @@
+Menu="Utilities"
+Title="Nvidia Vgpu Driver"
+Icon="nvidia-driver.png"
+---
+<?php
+//Get selected driver version
+//$selected_v = shell_exec("/usr/local/emhttp/plugins/nvidia-vgpu-driver/include/exec.sh get_selected_version");
+
+//Update driver versions and create file '/tmp/nvidia_vgpu_driver'
+shell_exec('/usr/local/emhttp/plugins/nvidia-vgpu-driver/include/exec.sh update');
+
+//Get latest version
+$latest_v = shell_exec('/usr/local/emhttp/plugins/nvidia-vgpu-driver/include/exec.sh get_latest_version');
+
+//Get current installed driver version
+$installed_v = shell_exec('/usr/local/emhttp/plugins/nvidia-vgpu-driver/include/exec.sh get_installed_version');
+
+//Get mdevctl list
+$mdev_list = shell_exec('/usr/local/emhttp/plugins/nvidia-vgpu-driver/include/exec.sh get_mdev_list');
+
+//Read driver versions from '/tmp/nvidia_vgpu_driver'
+error_reporting(E_ALL);
+ini_set('display_errors',1);
+
+//Get value from update check
+//$update_check = shell_exec("/usr/local/emhttp/plugins/nvidia-vgpu-driver/include/exec.sh update_check");
+
+//$filename = "/tmp/nvidia_vgpu_driver";
+//$eachlines = file($filename, FILE_IGNORE_NEW_LINES);
+?>
+
+<script>
+//Don't execute commands again if page is refreshed
+    if ( window.history.replaceState ) {
+        window.history.replaceState( null, null, window.location.href );
+    }
+</script>
+
+<script>
+function changeVersion(form) {
+    var package = form.drv_version.value;
+    openBox("/usr/local/emhttp/plugins/nvidia-vgpu-driver/include/exec.sh&arg1=update_version&arg2="+package,"Downloading Package",600,800,true);
+    return false;
+    }
+</script>
+
+<?
+$vars = parse_ini_file("/var/local/emhttp/var.ini");
+$toolTipsterAllowed = version_compare($vars['version'],"6.3.3",">=") ? "true" : "false";
+
+if (file_exists("$docroot/plugins/dynamix/include/Translations") ) {
+	require_once "$docroot/plugins/dynamix/include/Translations.php";
+	
+	$translationFile = "$docroot/languages/{$_SESSION['locale']}/".basename(strtolower($_SERVER['REQUEST_URI'])).".txt";
+	$genericFile     = "$docroot/languages/{$_SESSION['locale']}/translations.txt";
+	$pluginTranslations = @parse_lang_file($translationFile);
+	$genericTranslations = @parse_lang_file($genericFile);
+	$pluginTranslations = array_merge(is_array($genericTranslations) ? $genericTranslations : [],is_array($pluginTranslations) ? $pluginTranslations : [] );
+	$language = array_merge($pluginTranslations,$language);
+	if ( empty($language) ) 
+		$translations = false;
+}
+
+function tr($string,$ret=false) {
+	if ( function_exists("_") )
+		$string =  _($string);
+	if ( $ret )
+		return $string;
+	else
+		echo $string;
+}
+
+function addCfg($filename) {
+  return "<option value='$filename'>$filename</option>";
+}
+
+function pluginScan($filename) {
+  global $o;
+  
+  $dirContents = array_diff(scandir($filename),array(".",".."));
+  foreach ($dirContents as $cfg ) {
+    if ( is_dir("$filename/$cfg") ) {
+      pluginScan("$filename/$cfg");
+      continue;
+    }
+    if ( (pathinfo($cfg,PATHINFO_EXTENSION) == "toml" ) || (pathinfo($cfg,PATHINFO_EXTENSION) == "cfg") || (pathinfo($cfg,PATHINFO_EXTENSION) == "conf") || (pathinfo($cfg,PATHINFO_EXTENSION) == "xml")  || (pathinfo($cfg,PATHINFO_EXTENSION) == "yaml") || (pathinfo($cfg,PATHINFO_EXTENSION) == "ini")) {
+      $o .= addCfg("$filename/$cfg");
+    }
+  }
+}
+
+$o = "<option value='' selected'>".tr("Select File",true)."</option>";
+pluginScan("/etc/vgpu_unlock");
+?>
+
+<script src="<?=autov("/webGui/javascript/jquery.filetree.js")?>"></script>
+<script>
+var caURL = '/plugins/nvidia-vgpu-driver/include/exec.php';
+
+function editfile() {
+  var filename = $("#file").val();
+  $("#source").val(filename);
+  editfilemanual();
+}
+
+function editfilemanual() {
+  var filename = $("#source").val();
+  if ( ! filename ) {
+    $(".edits").prop("disabled",true);
+    return;
+  }
+  $(".choosers").prop("disabled",true);
+  $("#editing").html(filename);
+  $("#spinner").show();
+  $.post(caURL,{action:'edit',filename:filename},function(data) {
+    if (data) {
+      $("#spinner").hide();
+      var filedata = JSON.parse(data);
+      if ( filedata.format == "dos" ) {
+        $("#formatDiv").addClass("dosFormat");
+      } else {
+        $("#formatDiv").removeClass("dosFormat");
+      }
+      setFormatButton();
+      if ( filedata.error == "true" ) {    
+        $("#formatLine").hide();
+        $(".edits,.editButton,#editarea").prop("disabled",true);
+        $("#editarea").val("<?tr("Error reading file");?>");
+        $("#donebutton,.choosers").prop("disabled",false);
+      } else { 
+        $("#formatLine").show();
+        $("#editarea").val(filedata.contents);
+        $("#editarea").attr("data-orig",filedata.contents);
+        $(".edits,#cancelbutton").prop("disabled",false);
+        $(".editButton,#donebutton").prop("disabled",true);
+      }
+    }
+  });
+  $("#backup").html("<?tr("No Backup File Found");?>");
+  $.post(caURL,{action:'getBackup',filename:filename},function(data) {
+    if (data) {
+      $("#backup").html(data);
+      $("#backup").val(data);
+    }
+  });    
+}
+
+function cancelEdit() {
+  var orig = $("#editarea").attr("data-orig");
+  $("#editarea").val(orig);
+  $("#file").val("");
+  $("#formatLine").hide();
+  $(".choosers,#donebutton").prop("disabled",false);
+  $("#cancelbutton,.edits").prop("disabled",true);
+}
+
+function saveEdits() {
+  var filedata = new Object;
+  filedata.filename = $("#editing").html();
+  filedata.contents = $("#editarea").val();
+  filedata.format = $("#formatDiv").hasClass("dosFormat");
+  $("#spinner").show();
+  $.post(caURL,{action:'save',filedata:filedata},function(data) {
+    if (data) {
+      $("#file").val("");
+      $("#formatLine,#spinner").hide();
+      $(".choosers,#donebutton").prop("disabled",false);
+      $("#cancelbutton,.edits").prop("disabled",true);
+    }
+  });
+}
+
+function toggleFormat() {
+  $(".ca-switch-button-button").toggleClass("dosFormat");
+  setFormatButton();
+}
+
+function setFormatButton() {
+  if ( $(".ca-switch-button-button").hasClass("dosFormat") ) {
+    $(".ca-switch-button-button").css("left","12px");
+    $("#format").html("DOS (crlf)");
+  } else {
+    $(".ca-switch-button-button").css("left","0px");
+    $("#format").html("Linux (cr)");
+  }
+  $(".editButton").prop("disabled",false);
+}
+</script>
+
+<h1 style="text-align: center;"><a href="https://forums.unraid.net/" target="_blank" rel="noopener"><span style="color: green;">Nvidia vGPU Driver Package</span></a></h1>
+
+<div style="width: 50%; float:left">
+    <div id="title">
+        <span class="left"></span>
+    </div>
+    <table class="settings">
+        <tr>
+            <td><b><font size="+1">nVidia vgpu Info:</font></b></td>
+        </tr>
+        <tr>
+            <td>Nvidia vgpu Driver Version:</td>
+            <td style="color:green"><b><?=`nvidia-smi | grep "Driver Version" | cut -d ' ' -f3`?></b></td>
+        </tr>
+        <tr>
+            <td>Installed GPU(s):</td>
+            <td style="color:green"><b><?=`nvidia-smi --query-gpu=index,name,gpu_bus_id,uuid --format=csv,noheader | tr "," "\n" | sed 's/^[ \t]*//' | sed -e s/00000000://g | sed '0~4G' | sed 's/^[0-9]$/&:/' | sed 's/$/<br>/'`?></b></td>
+        </tr>
+
+        <tr>
+            <td>Mdevctl List:</td>
+				<? if ($mdev_list !== ''): ?>
+					<td style="color:green"><b><?=`mdevctl list | sed 's/$/<br>/'`?></b></td>				
+				<? else: ?>
+					<td style="color:red">Cannot get MDEV LIST !</td>
+				<? endif; ?>
+        </tr>
+    </table>
+</div>
+
+<div style="width: 50%; float:right">
+    <div id="title">
+        <span class="right"></span>
+    </div>
+    <table class="settings">
+        <tr>
+            <b><font size="+1">Mdevctl types:</font></b>
+        </tr>
+        <tr>
+			<td style="color:green"><b><?=`mdevctl types | sed 's/^[ \t]*//' | sed 's/$/<br>/'`?></b></td>
+		</tr>
+	</table>
+</div>
+
+<div style="width: 50%; float:left">
+    <div id="title">
+        <span class="left"></span>
+    </div>
+    <table class="settings">
+        <tr>
+            <td><b><font size="+1">System Info</font></b></td>
+        </tr>
+        <tr>
+            <td>Unraid Version:</td>
+            <td style="color: #99cc00;"><b><?=`cat /etc/unraid-version | cut -d '"' -f2`?></b></td>
+        </tr>
+        <tr>
+            <td>Kernel:</td>
+            <td style="color: #99cc00;"><b><?=`uname -r`?></b></td>
+        </tr>
+        <tr>
+        </tr>
+    </table>
+  </div>
+
+<div style="width: 50%; float:left">
+    <div id="title">
+        <span class="left"></span>
+    </div>
+    <table class="settings">
+        <tr>
+
+<style>
+.txtdiv {display:inline-block;}
+.txtarea {resize:both;border:1px solid red;width:600px;height:300px;font-family:monospace;}
+.fileTree{width:305px;max-height:150px;overflow:scroll;position:absolute;z-index:100;display:none;color:initial;}
+table {background-color:transparent;}
+table tbody td {line-height:1.4rem;}
+</style>
+<link type="text/css" rel="stylesheet" href="<?=autov('/webGui/styles/jquery.filetree.css')?>">
+<link type="text/css" rel="stylesheet" href="<?=autov('/plugins/nvidia-vgpu-driver/styles/switchbutton.css')?>">
+
+<span id='debugging'></span>
+<?tr("Select a file to edit: ");?>
+<select class='choosers' id='file' onchange='editfile();'><?=$o?></select> or <input class='choosers' type='text' id="source" name="shareFolder" value="/" data-pickroot="/"><font size='5'><i style='vertical-align:middle;cursor:pointer;' onclick='editfilemanual();' class="fa fa-pencil-square-o" aria-hidden="true"></i></font>  <?tr("note: editing a binary file could have unintended consequences");?><span id='spinner' style='display:none;'><img width='25px' src='/plugins/nvidia-vgpu-driver/images/spinner2.gif'></span>
+<div width:100%;>
+<div class='txtdiv'>
+<center><?tr("Editing");?>: <span id='editing'><?tr("No file selected");?></span></center>
+<textarea wrap='off' class='edits txtarea' id='editarea' oninput='$(".editButton").prop("disabled",false);'></textarea>
+</div>
+<div class='txtdiv'>
+<center><?tr("Backup File");?></center>
+<textarea wrap='off' class='txtarea' id='backup' disabled></textarea>
+</div>
+</div>
+<div>
+<div id='formatLine' style='display:none;'><div class='ca_tooltip ca-switch-button-background' style='width:25px; height:11px;' onclick='toggleFormat();' title='<?tr("Generally, it is not recommended to change the format");?>'><div id='formatDiv' class='ca-switch-button-button' style='width:12px; height:11px; left:11px;'></div></div>
+<?tr("File Format");?>: <font color='purple'><span id='format'></span></font></div></div>
+<input type='button' id='cancelbutton' value='<?tr("Cancel");?>' onclick='cancelEdit();' disabled><input class='edits editButton' type='button' value='<?tr("Apply");?>' onclick='saveEdits();'><input id='donebutton' type='button' value='<?tr("Done");?>' onclick='done();'>
+<span id='debugging'></span>
+</tr>
+</table>
+</div>
+
+
+<?php
+if(isset($_POST['changeUPDcheck'])) {
+$updata_check_selected = $_POST["updata_check_selected"];
+shell_exec("/usr/local/emhttp/plugins/nvidia-vgpu-driver/include/exec.sh change_update_check ".escapeshellarg($updata_check_selected)."");
+echo '<script>parent.window.location.reload();</script>';
+}
+?>

@@ -1,0 +1,240 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY name      "novidio-vgpu-driver">
+  <!ENTITY author    "novidio">
+  <!ENTITY version   "2024.12.28">
+  <!ENTITY launch    "Settings/novidio-vgpu-driver">
+  <!ENTITY gitURL    "https://github.com/&author;/unraid-&name;/raw/master">
+  <!ENTITY pluginURL "&gitURL;/&name;.plg">
+  <!ENTITY md5       "TODO">
+  <!ENTITY plugin    "/boot/config/plugins/&name;">
+  <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
+  <!ENTITY packages  "/boot/config/plugins/&name;/packages">
+]>
+
+<PLUGIN  name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" min="6.11.5" support="https://www.lxg2016.com/">
+
+<CHANGES>
+##2024.12.15
+- Works with novidio build and deployment
+
+###2023.05.01
+- Fix Bug
+
+###2023.05.01
+- The code is being modified and is currently incomplete
+
+###2023.04.30
+- Re-enable nvidia-vgpu driver plugin
+
+###2022.09.01
+- fix package
+
+###2022.08.22-1
+- fix package
+
+###2022.08.22
+- fix package
+
+###2022.08.15
+- fix package
+
+###2022.08.14
+- Initial release
+
+</CHANGES>
+
+<FILE Run="/bin/bash">
+<INLINE>
+rm -f $(ls /boot/config/plugins/&name;/&name;*.txz 2>/dev/null|grep -v '&version;')
+</INLINE>
+</FILE>
+
+<FILE Name="/boot/config/plugins/&name;/&name;-&version;.txz" Run="upgradepkg --install-new">
+<URL>&gitURL;/packages/&name;-&version;.txz</URL>
+<MD5>&md5;</MD5>
+</FILE>
+
+<FILE Name="&emhttp;/README.md">
+<INLINE>
+**Nvidia Vgpu Driver**
+
+This plugin will install the nvidia vgpu driver, which will reuse your graphics card in a virtual machine
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+
+download() {
+#Download Nvidia Vgpu Driver Package
+if wget -q -nc --show-progress --progress=bar:force:noscroll -O "&packages;/${KERNEL_V%%-*}/${LAT_PACKAGE}" "${DL_URL}/${LAT_PACKAGE}" ; then
+  wget -q -nc --show-progress --progress=bar:force:noscroll -O "&packages;/${KERNEL_V%%-*}/${LAT_PACKAGE}.md5" "${DL_URL}/${LAT_PACKAGE}.md5"
+  if [ "$(md5sum &packages;/${KERNEL_V%%-*}/${LAT_PACKAGE} | awk '{print $1}')" != "$(cat &packages;/${KERNEL_V%%-*}/${LAT_PACKAGE}.md5 | awk '{print $1}')" ]; then
+    echo
+    echo "-----ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR------"
+    echo "--------------------------------CHECKSUM ERROR!---------------------------------"
+    rm -rf &plugin; &emhttp;
+    exit 1
+  fi
+  echo
+  sed -i '/driver_version=/c\driver_version=latest' "&plugin;/settings.cfg"
+  echo "----Successfully downloaded Nvidia Vgpu Driver Package v$(echo $LAT_PACKAGE | cut -d '-' -f3), please wait!----"
+else
+  echo
+  echo "--------------Can't download Nvidia Driver Package v$(echo $LAT_PACKAGE | cut -d '-' -f3)-----------------"
+  rm -rf &plugin; &emhttp;
+  exit 1
+fi
+}
+
+get_version() {
+LAT_PACKAGE="$(wget -qO- https://api.github.com/repos/novidio/unraid-novidio-vgpu-driver/releases/tags/${KERNEL_V} | jq -r '.assets[].name' | grep "${PACKAGE}" | grep -E -v '\.md5$' | sort -V | tail -1)"
+if [ -z "$LAT_PACKAGE" ]; then
+  if [ -z "$CUR_V" ]; then
+    echo
+    echo "-----ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR------"
+    echo "---Can't get latest Nvidia vgpu driver version and found no installed local driver---"
+    rm -rf &plugin; &emhttp;
+    exit 1
+  else
+    LAT_PACKAGE=${CUR_V}
+  fi
+fi
+}
+
+#Check if driver is already downloaded
+check() {
+if ! ls -1 &packages;/${KERNEL_V%%-*}/ | grep -q "${PACKAGE}" ; then
+  get_version
+  echo
+  echo "+=============================================================================="
+  echo "| WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING"
+  echo "|"
+  echo "| Don't close this window with the red 'X' in the top right corner until the 'DONE' button is displayed!"
+  echo "|"
+  echo "| WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING"
+  echo "+=============================================================================="
+  echo
+  echo "-----------------Downloading Nvidia Vgpu Driver Package v$(echo $LAT_PACKAGE | cut -d '-' -f3)------------------"
+  echo "----------This could take some time, please don't close this window!------------"
+  download
+else
+  LAT_PACKAGE=$CUR_V
+  echo
+  echo "--------------------Nvidia vgpu driver v$(echo $LAT_PACKAGE | cut -d '-' -f3) found locally---------------------"
+fi
+}
+
+#Install driver package
+install() {
+/sbin/installpkg "&packages;/${KERNEL_V%%-*}/${PACKAGE}*.txz"
+depmod -a >> /dev/null
+nvidia-modprobe  >> /dev/null
+}
+
+activate() {
+if [ "$(which Xorg 2>/dev/null)" ] &amp;&amp; [ "$(cat /boot/config/plugins/nvidia-vgpu-driver/settings.cfg | grep "disable_xconfig" | cut -d '=' -f2)" != "true" ]; then
+  nvidia-xconfig --output-xconfig=/etc/X11/xorg.conf --silent 2>/dev/null
+fi
+if [[ "$SET_DRV_V" != "latest" &amp;&amp; "$SET_DRV_V" != "latest_prb" &amp;&amp; "$SET_DRV_V" != "latest_nfb" ]]; then
+  sed -i '/update_check=/c\update_check=false' "&plugin;/settings.cfg"
+fi
+}
+
+#Set variables
+KERNEL_V="$(uname -r)"
+PACKAGE="nvidia"
+DL_URL="https://github.com/novidio/unraid-novidio-vgpu-driver/releases/download/${KERNEL_V}"
+
+if [ ! -d "&packages;/${KERNEL_V%%-*}" ]; then
+  mkdir -p "&packages;/${KERNEL_V%%-*}"
+  CUR_V=""
+else
+  CUR_V="$(ls -p &packages;/${KERNEL_V%%-*} 2&gt;/dev/null | grep -E -v '\.md5' | sort -V | tail -1)"
+fi
+
+#Create settings file if not found
+if [ ! -f "&plugin;/settings.cfg" ]; then
+  echo 'first_installation=true
+driver_version=latest
+disable_xconfig=false
+update_check=true' > "&plugin;/settings.cfg"
+fi
+
+#Add update check entry if not exists
+if [ ! "$(grep -q "update_check=" &plugin;/settings.cfg)" ]; then
+  echo "update_check=true" &gt;&gt; &plugin;/settings.cfg
+fi
+
+if [ "$(grep -q "local_version=" &plugin;/settings.cfg)" ]; then
+  sed -i '/local_version=/d' &plugin;/settings.cfg
+fi
+
+#Move old package directory to new package directory to be compliant with 6.11
+if find &packages; -maxdepth 1 -type f -name "*.txz" 2>/dev/null ; then
+  mv $(find &packages; -maxdepth 1 -type f -name "*.txz") &packages;/${KERNEL_V%%-*}/ 2>/dev/null
+  CUR_V="$(ls -p &packages;/${KERNEL_V%%-*} 2&gt;/dev/null | grep -E -v '\.md5' | sort -V | tail -1)"
+fi
+
+#Check if Nvidia vgpu Driver Package is already downloaded
+check
+
+#Check for old packages that are not suitable for this Kernel and not suitable for the current Nvidia vgpu driver version
+rm -f $(ls -d &packages;/* 2>/dev/null | grep -v "${KERNEL_V%%-*}")
+rm -f $(ls &packages;/${KERNEL_V%%-*}/* 2>/dev/null | grep -v "$LAT_PACKAGE")
+
+#Install Nvidia vgpu Driver Package
+if ! modinfo nvidia -0 >/dev/null 2>&amp;1 ; then
+  echo
+  echo "-----------------Installing Nvidia Vgpu Driver Package v$(echo $LAT_PACKAGE | cut -d '-' -f3)-------------------"
+  install > /dev/null
+  activate
+else
+  activate
+fi
+
+#Enable update check
+if [ "$UPDATE_CHECK" == "true" ]; then
+  if [ ! "$(crontab -l | grep "/usr/local/emhttp/plugins/nvidia-vgpu-driver/include/update-check.sh")" ]; then
+    (crontab -l ; echo ""$((0 + $RANDOM % 59))" "$(shuf -i 8-9 -n 1)" * * * /usr/local/emhttp/plugins/nvidia-vgpu-driver/include/update-check.sh &amp;&gt;/dev/null 2&gt;&amp;1") | crontab -
+  fi
+fi
+
+#Display message to disable and enable Docker on first installation or display successful message
+if [ "$(grep "first_installation=" "&plugin;/settings.cfg" | cut -d '=' -f2)" == "true" ]; then
+  /usr/local/emhttp/plugins/dynamix/scripts/notify -e "Nvidia Vgpu Driver" -d "Please go to -> Settings -> nvidia-vgpu-driver Perform Set up"
+  sed -i '/first_installation=true/c\first_installation=false' "&plugin;/settings.cfg"
+  echo
+  echo "------------Installation of Nvidia vgpu driver v$(echo $LAT_PACKAGE | cut -d '-' -f3) successful----------------"
+  echo
+  echo "Nvidia Vgpu Driver" -d "Please go to -> Settings -> nvidia-vgpu-driver Perform Set up"
+else
+  sed -i '/first_installation=true/c\first_installation=false' "&plugin;/settings.cfg"
+  echo
+  echo "--------------Installation of Nvidia vgpu driver v$(echo $LAT_PACKAGE | cut -d '-' -f3) successful--------------"
+fi
+
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+
+echo "----------------------------------------"
+echo "---Uninstalling Nvidia vGPU driver package---"
+echo "----------------------------------------"
+# Remove plugin related files
+removepkg &name;-&version;
+crontab -l | grep -v '/usr/local/emhttp/plugins/nvidia-vgpu-driver/include/update-check.sh &amp;&gt;/dev/null 2&gt;&amp;1'  | crontab -
+rm -rf /usr/local/emhttp/plugins/&name;
+rm -rf &plugin;
+echo
+echo "--------------------------------------------------------------------------------"
+echo "-------------Nvidia vGPU Driver uninstalled, please reboot your server!--------------"
+echo "--------------------------------------------------------------------------------"
+echo
+
+</INLINE>
+</FILE>
+</PLUGIN>
