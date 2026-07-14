@@ -2,11 +2,11 @@
 <!DOCTYPE PLUGIN [
   <!ENTITY name      "novidio-vgpu-driver">
   <!ENTITY author    "novidio">
-  <!ENTITY version   "2026.07.13a">
+  <!ENTITY version   "2026.07.13b">
   <!ENTITY launch    "Settings/novidio-vgpu-driver">
   <!ENTITY gitURL    "https://github.com/&author;/unraid-&name;/raw/master">
   <!ENTITY pluginURL "&gitURL;/&name;.plg">
-  <!ENTITY md5       "dd0f5a62159749e18d232a0d37074fec">
+  <!ENTITY md5       "ed720a49518c163d4448eda832b72f82">
   <!ENTITY plugin    "/boot/config/plugins/&name;">
   <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
   <!ENTITY packages  "/boot/config/plugins/&name;/packages">
@@ -15,6 +15,13 @@
 <PLUGIN  name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" min="6.11.5" support="https://www.lxg2016.com/">
 
 <CHANGES>
+##2026.07.13b
+- Fix: toggling vGPU unlock and clicking "Restart vGPU Services" still showed the
+  pre-toggle profile list (e.g. native P4 profiles instead of the P40-spoofed
+  ones). nvidia-vgpu-vfio only builds mdev_supported_types once per GPU
+  registration, so a plain daemon restart doesn't rebuild it - "Restart vGPU
+  Services" now also reloads the nvidia-vgpu-vfio kernel module
+
 ##2026.07.13a
 - The profile picker is now a comparison table: framebuffer, display heads,
   max resolution, FRL and free/max instances per profile (read from the driver)

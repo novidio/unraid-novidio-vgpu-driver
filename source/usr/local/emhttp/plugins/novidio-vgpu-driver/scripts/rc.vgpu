@@ -94,6 +94,23 @@ load_modules() {
   modprobe nvidia-vgpu-vfio 2>/dev/null
 }
 
+# nvidia-vgpu-vfio only builds each GPU's mdev_supported_types once, when it first
+# registers that GPU with the RM. Restarting nvidia-vgpud/-mgr re-pushes config
+# (e.g. after toggling vgpu_unlock) but does NOT rebuild that sysfs type list, so
+# the profile picker keeps showing stale/wrong profiles (e.g. still native P4
+# profiles after enabling unlock spoofing as a P40). Unloading and reloading the
+# module forces it to rebuild the type list from the now-current identity.
+reload_vfio() {
+  if lsmod | grep -qw nvidia_vgpu_vfio; then
+    log "Reloading nvidia-vgpu-vfio so mdev_supported_types reflects the current unlock setting"
+    modprobe -r nvidia_vgpu_vfio 2>/dev/null
+    if lsmod | grep -qw nvidia_vgpu_vfio; then
+      log "WARNING: could not unload nvidia-vgpu-vfio (still in use?) - profile list may still be stale"
+    fi
+  fi
+  modprobe nvidia-vgpu-vfio 2>/dev/null
+}
+
 daemons_stop() {
   killall nvidia-vgpu-mgr 2>/dev/null
   killall nvidia-vgpud 2>/dev/null
@@ -310,7 +327,7 @@ case "$1" in
   ensure)  do_ensure ;;
   start)   do_start ;;
   stop)    do_stop ;;
-  restart) do_stop; do_start ;;
+  restart) do_stop; reload_vfio; do_start ;;
   update)  do_update ;;
   apply)   setup_config; apply_devices ;;
   status)  do_status ;;
