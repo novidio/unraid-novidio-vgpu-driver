@@ -2,11 +2,11 @@
 <!DOCTYPE PLUGIN [
   <!ENTITY name      "novidio-vgpu-driver">
   <!ENTITY author    "novidio">
-  <!ENTITY version   "2026.07.13b">
+  <!ENTITY version   "2026.07.13c">
   <!ENTITY launch    "Settings/novidio-vgpu-driver">
   <!ENTITY gitURL    "https://github.com/&author;/unraid-&name;/raw/master">
   <!ENTITY pluginURL "&gitURL;/&name;.plg">
-  <!ENTITY md5       "ed720a49518c163d4448eda832b72f82">
+  <!ENTITY md5       "4d6064f0ccd27bd8c125cd2f2ad38d93">
   <!ENTITY plugin    "/boot/config/plugins/&name;">
   <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
   <!ENTITY packages  "/boot/config/plugins/&name;/packages">
@@ -15,12 +15,18 @@
 <PLUGIN  name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" min="6.11.5" support="https://www.lxg2016.com/">
 
 <CHANGES>
+##2026.07.13c
+- Fix (for real this time): the vGPU type list is cached in the RM inside
+  nvidia.ko - the kernel logs "vGPU type info already present for GPU" and
+  ignores config pushed after the first one, so toggling vGPU unlock showed the
+  wrong profiles (native P4 instead of P40-spoofed) even after a service restart
+  or a vfio-module reload. "Restart vGPU Services" now unloads and reloads the
+  whole nvidia driver stack, which is the only way to rebuild the profile list
+  without a reboot. Stop any VM using a vGPU first (the driver can't unload while
+  the GPU is in use).
+
 ##2026.07.13b
-- Fix: toggling vGPU unlock and clicking "Restart vGPU Services" still showed the
-  pre-toggle profile list (e.g. native P4 profiles instead of the P40-spoofed
-  ones). nvidia-vgpu-vfio only builds mdev_supported_types once per GPU
-  registration, so a plain daemon restart doesn't rebuild it - "Restart vGPU
-  Services" now also reloads the nvidia-vgpu-vfio kernel module
+- Attempt at the above by reloading only nvidia-vgpu-vfio (superseded by 13c)
 
 ##2026.07.13a
 - The profile picker is now a comparison table: framebuffer, display heads,

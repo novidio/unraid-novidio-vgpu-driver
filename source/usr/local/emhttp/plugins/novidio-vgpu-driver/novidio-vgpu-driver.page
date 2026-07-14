@@ -121,7 +121,7 @@ if (!empty($_POST['vgpu_action'])) {
       vgpu_set_setting('unlock', $unlock);
       shell_exec("$vgpu_emhttp/include/exec.sh change_update_check ".escapeshellarg($upd));
       $vgpu_msg = "Settings saved.";
-      if ($unlock_changed) $vgpu_msg .= " The vGPU unlock setting takes effect after 'Restart vGPU Services'.";
+      if ($unlock_changed) $vgpu_msg .= " Stop any VM using a vGPU, then click 'Restart vGPU Services' for the new unlock setting (and profile list) to take effect.";
       break;
     case 'save_override':
       if (!is_dir($vgpu_usercfg)) mkdir($vgpu_usercfg, 0755, true);
@@ -348,6 +348,7 @@ Installing live only works while no VM is using a vGPU.
 </table>
 <div style="margin-top:10px">
   <input type="button" value="Restart vGPU Services" onclick="restartServices()">
+  <span style="opacity:.7">&nbsp;Reloads the nvidia driver to rebuild the profile list. Stop any VM using a vGPU first.</span>
 </div>
 </div>
 

@@ -94,21 +94,41 @@ load_modules() {
   modprobe nvidia-vgpu-vfio 2>/dev/null
 }
 
-# nvidia-vgpu-vfio only builds each GPU's mdev_supported_types once, when it first
-# registers that GPU with the RM. Restarting nvidia-vgpud/-mgr re-pushes config
-# (e.g. after toggling vgpu_unlock) but does NOT rebuild that sysfs type list, so
-# the profile picker keeps showing stale/wrong profiles (e.g. still native P4
-# profiles after enabling unlock spoofing as a P40). Unloading and reloading the
-# module forces it to rebuild the type list from the now-current identity.
-reload_vfio() {
-  if lsmod | grep -qw nvidia_vgpu_vfio; then
-    log "Reloading nvidia-vgpu-vfio so mdev_supported_types reflects the current unlock setting"
-    modprobe -r nvidia_vgpu_vfio 2>/dev/null
-    if lsmod | grep -qw nvidia_vgpu_vfio; then
-      log "WARNING: could not unload nvidia-vgpu-vfio (still in use?) - profile list may still be stale"
-    fi
+# true while the base nvidia.ko module is loaded
+nvidia_loaded() {
+  grep -qw '^nvidia' /proc/modules
+}
+
+# Unload the whole nvidia driver stack. Returns non-zero if nvidia.ko is still
+# loaded afterwards (something is holding the GPU - a running VM, Xorg, or a
+# process with /dev/nvidia* open).
+unload_nvidia_stack() {
+  modprobe -q -r nvidia_vgpu_vfio
+  modprobe -q -r nvidia_drm
+  modprobe -q -r nvidia_modeset
+  modprobe -q -r nvidia_uvm
+  rmmod nvidia 2>/dev/null
+  ! nvidia_loaded
+}
+
+# The vGPU *type* list is latched into the RM inside nvidia.ko the first time
+# nvidia-vgpud pushes it; after that the kernel logs "vGPU type info already
+# present for GPU" and ignores every later push. So once the types are built,
+# neither a daemon restart nor a nvidia-vgpu-vfio reload changes
+# mdev_supported_types - e.g. after toggling vgpu_unlock the P40-spoofed profiles
+# are pushed but the sysfs list keeps the original native P4 profiles. The only
+# way to rebuild it without a reboot is to unload and reload nvidia.ko itself.
+reload_driver() {
+  if ! nvidia_loaded; then
+    return 0
   fi
-  modprobe nvidia-vgpu-vfio 2>/dev/null
+  log "Reloading the nvidia driver stack so the vGPU profile list reflects the current config"
+  if ! unload_nvidia_stack; then
+    log "WARNING: could not unload the nvidia driver - the GPU is still in use."
+    log "A VM with a vGPU (or Xorg / an nvidia process) is holding it. The profile"
+    log "list will not change until the GPU is free: stop your VMs and try again."
+    return 1
+  fi
 }
 
 daemons_stop() {
@@ -248,14 +268,7 @@ do_update() {
   fi
   log "Live-installing driver v${new} (currently loaded: $(loaded_version || echo none))"
   do_stop
-  if grep -qw '^nvidia' /proc/modules; then
-    modprobe -q -r nvidia_vgpu_vfio
-    modprobe -q -r nvidia_drm
-    modprobe -q -r nvidia_modeset
-    modprobe -q -r nvidia_uvm
-    rmmod nvidia 2>/dev/null
-  fi
-  if grep -qw '^nvidia' /proc/modules; then
+  if ! unload_nvidia_stack; then
     log "ERROR: cannot unload the nvidia module (a VM is probably using a vGPU)."
     log "The new driver was downloaded and will be installed on the next reboot."
     notify "New vGPU driver downloaded but the old driver is in use. Stop your VMs and retry, or reboot to install." "alert"
@@ -327,7 +340,7 @@ case "$1" in
   ensure)  do_ensure ;;
   start)   do_start ;;
   stop)    do_stop ;;
-  restart) do_stop; reload_vfio; do_start ;;
+  restart) do_stop; reload_driver; do_start ;;
   update)  do_update ;;
   apply)   setup_config; apply_devices ;;
   status)  do_status ;;
