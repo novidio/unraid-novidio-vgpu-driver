@@ -156,10 +156,22 @@ foreach (glob("/sys/bus/pci/devices/*") as $dev) {
   $gpu_types[$pci] = [];
   foreach (glob("$dev/mdev_supported_types/*") as $tdir) {
     $types_present = true;
+    // description holds the profile parameters, e.g.
+    // "num_heads=4, frl_config=60, framebuffer=1024M, max_resolution=5120x2880, max_instance=8"
+    $info = [];
+    foreach (preg_split('/,\s*/', trim(@file_get_contents("$tdir/description"))) as $kv) {
+      $p = explode('=', $kv, 2);
+      if (count($p) == 2) $info[trim($p[0])] = trim($p[1]);
+    }
     $gpu_types[$pci][] = [
       'type'  => basename($tdir),
       'name'  => trim(@file_get_contents("$tdir/name")),
       'avail' => trim(@file_get_contents("$tdir/available_instances")),
+      'fb'    => $info['framebuffer']    ?? '',
+      'heads' => $info['num_heads']      ?? '',
+      'res'   => $info['max_resolution'] ?? '',
+      'frl'   => $info['frl_config']     ?? '',
+      'max'   => $info['max_instance']   ?? '',
     ];
   }
   usort($gpu_types[$pci], fn($a, $b) => strnatcmp($a['name'], $b['name']));
@@ -184,18 +196,46 @@ if (window.history.replaceState) window.history.replaceState(null, null, window.
 
 var gpuTypes = <?= json_encode($gpu_types) ?>;
 
+function esc(s) {
+  var d = document.createElement('div');
+  d.innerText = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+
 function fillTypes() {
   var pci = document.getElementById('add_pci').value;
-  var sel = document.getElementById('add_type');
-  sel.innerHTML = '';
+  var box = document.getElementById('type_table');
   var types = gpuTypes[pci] || [];
   if (!types.length) {
-    sel.add(new Option('-- no mdev types available on this GPU --', ''));
+    box.innerHTML = '<i>No mdev types available on this GPU.</i>';
     return;
   }
-  types.forEach(function(t) {
-    var label = t.name + ' (' + t.type + ', ' + t.avail + ' left)';
-    sel.add(new Option(label, t.type));
+  var html = '<table class="vgpu-table vgpu-ptable">' +
+    '<tr><th></th><th>Profile</th><th>Type</th><th>Framebuffer</th><th>Displays</th><th>Max Resolution</th><th>FRL</th><th>Free</th></tr>';
+  types.forEach(function(t, i) {
+    var soldout = (parseInt(t.avail, 10) || 0) < 1;
+    html += '<tr class="vgpu-prow' + (soldout ? ' vgpu-soldout' : '') + '" data-row="' + i + '">' +
+      '<td><input type="radio" name="mtype" value="' + esc(t.type) + '"' + (soldout ? ' disabled' : '') + '></td>' +
+      '<td><b>' + esc(t.name) + '</b></td>' +
+      '<td>' + esc(t.type) + '</td>' +
+      '<td>' + esc(t.fb) + '</td>' +
+      '<td>' + esc(t.heads) + '</td>' +
+      '<td>' + esc(t.res) + '</td>' +
+      '<td>' + esc(t.frl ? t.frl + ' fps' : '') + '</td>' +
+      '<td>' + esc(t.avail + (t.max ? ' / ' + t.max : '')) + '</td>' +
+      '</tr>';
+  });
+  html += '</table>';
+  box.innerHTML = html;
+  // whole row selects the radio; highlight the selected row
+  box.querySelectorAll('tr.vgpu-prow').forEach(function(row) {
+    row.addEventListener('click', function() {
+      var radio = row.querySelector('input[type=radio]');
+      if (!radio || radio.disabled) return;
+      radio.checked = true;
+      box.querySelectorAll('tr.vgpu-prow').forEach(function(r) { r.classList.remove('vgpu-selected'); });
+      row.classList.add('vgpu-selected');
+    });
   });
 }
 
@@ -248,6 +288,12 @@ function updateDriver() {
 .vgpu-banner.warn {background: rgba(255,167,38,.12); border: 1px solid #ffa726;}
 .vgpu-xml {display: none; background: rgba(0,0,0,.25); padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 1.1rem;}
 .vgpu-addform td {padding: 4px 10px;}
+.vgpu-ptable {width: auto; min-width: 640px;}
+.vgpu-ptable td {font-family: inherit; white-space: nowrap;}
+tr.vgpu-prow {cursor: pointer;}
+tr.vgpu-prow:hover {background: rgba(125,125,125,.12);}
+tr.vgpu-selected {background: rgba(76,175,80,.18) !important;}
+tr.vgpu-soldout {opacity: .45; cursor: not-allowed;}
 .vgpu-mono {font-family: bitstream, monospace;}
 #override_area {width: 100%; max-width: 900px; height: 220px; font-family: bitstream, monospace;}
 </style>
@@ -344,7 +390,7 @@ adding the hostdev XML (click <i class="fa fa-code"></i>) to the VM's XML templa
 </table>
 
 <h4>Add a vGPU</h4>
-<form method="POST">
+<form method="POST" onsubmit="if(!document.querySelector('input[name=mtype]:checked')){alert('Select a profile from the table first.');return false;}">
 <input type="hidden" name="vgpu_action" value="add_device">
 <table class="vgpu-addform">
 <tr><td>GPU:</td><td>
@@ -354,7 +400,7 @@ adding the hostdev XML (click <i class="fa fa-code"></i>) to the VM's XML templa
   <?php endforeach; ?>
   </select>
 </td></tr>
-<tr><td>Profile:</td><td><select id="add_type" name="mtype" style="min-width:340px"></select></td></tr>
+<tr><td style="vertical-align:top">Profile:</td><td><div id="type_table"></div></td></tr>
 <tr><td>UUID:</td><td>
   <input type="text" id="add_uuid" name="uuid" size="40" class="vgpu-mono" value="<?= htmlspecialchars($new_uuid) ?>">
   <i class="fa fa-refresh" style="cursor:pointer" title="Generate new UUID" onclick="genUUID()"></i>

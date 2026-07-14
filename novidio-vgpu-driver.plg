@@ -2,11 +2,11 @@
 <!DOCTYPE PLUGIN [
   <!ENTITY name      "novidio-vgpu-driver">
   <!ENTITY author    "novidio">
-  <!ENTITY version   "2026.07.13">
+  <!ENTITY version   "2026.07.13a">
   <!ENTITY launch    "Settings/novidio-vgpu-driver">
   <!ENTITY gitURL    "https://github.com/&author;/unraid-&name;/raw/master">
   <!ENTITY pluginURL "&gitURL;/&name;.plg">
-  <!ENTITY md5       "30e0a51f27d30eeef0eeaebc08b85ffb">
+  <!ENTITY md5       "dd0f5a62159749e18d232a0d37074fec">
   <!ENTITY plugin    "/boot/config/plugins/&name;">
   <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
   <!ENTITY packages  "/boot/config/plugins/&name;/packages">
@@ -15,6 +15,10 @@
 <PLUGIN  name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" min="6.11.5" support="https://www.lxg2016.com/">
 
 <CHANGES>
+##2026.07.13a
+- The profile picker is now a comparison table: framebuffer, display heads,
+  max resolution, FRL and free/max instances per profile (read from the driver)
+
 ##2026.07.13
 - vGPU devices are now managed from the plugin page (no user-scripts script needed):
   add/remove/start/stop mdev devices, profiles read live from the GPU, VM XML snippets
