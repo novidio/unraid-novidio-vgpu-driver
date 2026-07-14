@@ -1,66 +1,71 @@
 # Unraid Nvidia vGPU Driver plugin
+
 # NO LONGER MERGED DRIVER!!!!
 
 As of 6.12.54 we are no longer using the merged driver. This means the driver will not work on docker containers in Unraid. The driver will only support vGPU usage in a virtual machine.
 
 - Latest version currently supported: Check releases tab
-
-- Unraid driver for vgpu. Split GPU amongst VMs
-
+- Unraid driver for vGPU. Split your GPU amongst VMs.
 - This is the repository for the Unraid vGPU Driver plugin.
 
-- 1.Install 'user scripts' in the unraid app store
-- 2.Create a new run script. (Name customization)
-- 3.Newly created script content
+## How it works
 
-```shell
-#!/bin/bash
-# set -x
+Install the plugin, then go to **Settings → Novidio vGPU**. Everything is managed from
+that page — **no user-scripts script is needed anymore**:
 
-## Modify the following variables to suit your environment
-#WIN is the UUID for a VM
-#UBU is a second UUID for a VM. These two allow for splitting the GPU
-#NVPCI is the PCI ID for the GPU. Check the tools tab for this number
-#MDEVLIST is the profile you are going to use from the supported MDEVCTL list
-WIN="2b6976dd-8620-49de-8d8d-ae9ba47a50db"
-UBU="5fd6286d-06ac-4406-8b06-f26511c260d3"
-NVPCI="0000:03:00.0"
-MDEVLIST="nvidia-65"
+1. The plugin downloads and installs the driver build matching your Unraid kernel
+   (published on the releases tab, tagged by kernel version).
+2. At every boot the plugin loads the modules in the right order
+   (`nvidia` → `mdev` → `nvidia-vgpu-vfio`), starts `nvidia-vgpud` / `nvidia-vgpu-mgr`
+   with vgpu_unlock, waits for the vGPU types to appear and recreates your configured
+   vGPU devices.
+3. On the plugin page you add a vGPU by picking your GPU, a profile (read live from
+   the driver) and a UUID (generated for you). The page shows the `<hostdev>` XML
+   snippet to paste into your VM template — uuid is the only thing that differs
+   per device:
 
-#define UUIDs for GPU
-#Change the variables below to match the ones above
-arr=( "${WIN}" "${UBU}" )
-
-for os in "${arr[@]}"; do
-    if [[ "$(mdevctl list)" == *"$os"* ]]; then
-        echo " [i] Found $os running, stopping and undefining..."
-        mdevctl stop -u "$os"
-        mdevctl undefine -u "$os"
-    fi
-done
-
-for os in "${arr[@]}"; do
-    echo " [i] Defining and running $os..."
-    mdevctl define -u "$os" -p "$NVPCI" --type "$MDEVLIST"
-    mdevctl start -u "$os"
-done
-
-echo " [i] Currently defined mdev devices:"
-mdevctl list
-```
-
-- 4.Set the script to run when booting the array
-- 5.The VM edits the XML template with the following code:
-
-    <hostdev mode='subsystem' type='mdev' managed='yes' model='vfio-pci' display='off' ramfb='off'>
+```xml
+    <hostdev mode='subsystem' type='mdev' managed='no' model='vfio-pci' display='off' ramfb='off'>
       <source>
         <address uuid='2b6976dd-8620-49de-8d8d-ae9ba47a50db'/>
       </source>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/>
     </hostdev>
+```
 
-- uuid, bus , slot Modify according to your needs.
+## Driver updates without a reboot
 
+When a new driver build is available the plugin page shows an **Update Now** button.
+The update stops the vGPU devices and daemons, unloads the old module, installs the
+new package and brings everything back up — no reboot needed. If a VM is holding a
+vGPU the module can't be unloaded; the plugin then keeps the old driver running and
+the new one installs on the next reboot instead.
+
+## Settings stored on the flash drive
+
+| Path | Purpose |
+|---|---|
+| `/boot/config/plugins/novidio-vgpu-driver/settings.cfg` | plugin settings (`unlock`, `update_check`, …) |
+| `/boot/config/plugins/novidio-vgpu-driver/vgpu-devices.cfg` | your vGPU devices (`UUID\|PCI\|TYPE`, managed by the page) |
+| `/boot/config/nvidia-vgpu/profile_override.toml` | vgpu_unlock profile overrides (editable on the page) |
+| `/boot/config/nvidia-vgpu/vgpuConfig.xml` | **optional** vgpuConfig.xml override |
+
+### vgpuConfig.xml override (older GPUs, e.g. Pascal / Tesla P4)
+
+`nvidia-vgpud` only accepts GPUs listed in `/usr/share/nvidia/vgpu/vgpuConfig.xml`.
+The 550 (vGPU 17.x) driver dropped Pascal cards from that file, so the daemon logs
+`GPU not supported by vGPU` and no mdev types appear. Fix: extract `vgpuConfig.xml`
+from a 16.x (535) vgpu-kvm host driver and place it at
+`/boot/config/nvidia-vgpu/vgpuConfig.xml`. The plugin applies it before starting the
+daemons at every boot and after **Restart vGPU Services**.
+
+### vGPU unlock
+
+The *vGPU unlock* setting on the plugin page is the single source of truth for
+`/etc/vgpu_unlock/config.toml`. Leave it **disabled** for natively supported cards
+(Tesla/Quadro — you get the native profiles, e.g. `P4-1Q`); enable it to spoof
+consumer GPUs. Changing it requires **Restart vGPU Services**. Note that the
+reported device ID changes with this setting (a P4 spoofed as P40 exposes different
+profile IDs), so pick your profile after setting it.
 
 ### Credits
 - Thanks to stl88083365 for the unraid plugin foundation

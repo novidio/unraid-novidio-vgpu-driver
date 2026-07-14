@@ -1,0 +1,318 @@
+#!/bin/bash
+# rc.vgpu - runtime control for the novidio-vgpu-driver plugin
+#
+# usage: rc.vgpu <command>
+#   ensure   - boot/plugin-update entry point: install driver package if needed,
+#              live-reload if a newer package was downloaded, bring the stack up
+#   start    - load modules, start vGPU daemons, apply configured mdev devices
+#   stop     - stop configured mdev devices and the vGPU daemons
+#   restart  - stop + start
+#   update   - live-install the downloaded driver package without a reboot
+#   apply    - (re)define and start all configured mdev devices
+#   status   - print a short status summary
+#
+# Persistent configuration lives on the flash drive:
+#   /boot/config/plugins/novidio-vgpu-driver/settings.cfg      - plugin settings
+#   /boot/config/plugins/novidio-vgpu-driver/vgpu-devices.cfg  - one device per line: UUID|PCI|TYPE
+#   /boot/config/nvidia-vgpu/profile_override.toml             - vgpu_unlock profile overrides
+#   /boot/config/nvidia-vgpu/vgpuConfig.xml                    - optional vgpuConfig.xml override
+#                                                                (e.g. a 535.x XML with Pascal profiles)
+
+PLUGIN="novidio-vgpu-driver"
+PLGCFG="/boot/config/plugins/${PLUGIN}"
+SETTINGS="${PLGCFG}/settings.cfg"
+DEVCFG="${PLGCFG}/vgpu-devices.cfg"
+USERCFG="/boot/config/nvidia-vgpu"
+UNLOCK_DIR="/etc/vgpu_unlock"
+UNLOCK_LIB="/usr/local/lib/libvgpu_unlock_rs.so"
+XML_OVERRIDE="${USERCFG}/vgpuConfig.xml"
+XML_TARGET="/usr/share/nvidia/vgpu/vgpuConfig.xml"
+KERNEL_V="$(uname -r)"
+PKGDIR="${PLGCFG}/packages/${KERNEL_V%%-*}"
+TYPES_TIMEOUT=60
+
+log() {
+  logger -t "${PLUGIN}" -- "$*"
+  echo "$*"
+}
+
+notify() {
+  /usr/local/emhttp/plugins/dynamix/scripts/notify -e "Nvidia vGPU Driver" -d "$1" -i "${2:-normal}" -l "/Settings/${PLUGIN}"
+}
+
+setting() {
+  grep -m1 "^${1}=" "${SETTINGS}" 2>/dev/null | cut -d '=' -f2
+}
+
+pkg_file() {
+  ls "${PKGDIR}"/nvidia-*.txz 2>/dev/null | sort -V | tail -1
+}
+
+# package assets are named nvidia-<driver version>-<kernel>-Unraid-1.txz
+pkg_version() {
+  local p
+  p="$(pkg_file)"
+  [ -n "$p" ] && basename "$p" | cut -d '-' -f2
+}
+
+installed_version() {
+  modinfo -F version nvidia 2>/dev/null | head -1
+}
+
+loaded_version() {
+  cat /sys/module/nvidia/version 2>/dev/null
+}
+
+types_present() {
+  ls -d /sys/bus/pci/devices/*/mdev_supported_types/nvidia-* >/dev/null 2>&1
+}
+
+# write vgpu_unlock config and optional vgpuConfig.xml override; must run before the daemons
+setup_config() {
+  mkdir -p "${USERCFG}" "${UNLOCK_DIR}" /boot/config/modprobe.d
+  [ -f "${USERCFG}/profile_override.toml" ] || touch "${USERCFG}/profile_override.toml"
+  ln -sf "${USERCFG}/profile_override.toml" "${UNLOCK_DIR}/profile_override.toml"
+  local unlock
+  unlock="$(setting unlock)"
+  [ "${unlock}" = "true" ] || unlock="false"
+  echo "unlock = ${unlock}" > "${UNLOCK_DIR}/config.toml"
+  if [ ! -f /boot/config/modprobe.d/nvidia.conf ]; then
+    echo "options nvidia cudahost=1" > /boot/config/modprobe.d/nvidia.conf
+  fi
+  if [ -f "${XML_OVERRIDE}" ] && [ -d "$(dirname "${XML_TARGET}")" ]; then
+    if ! cmp -s "${XML_OVERRIDE}" "${XML_TARGET}"; then
+      log "Applying custom vgpuConfig.xml from ${XML_OVERRIDE}"
+      cp -f "${XML_OVERRIDE}" "${XML_TARGET}"
+    fi
+  fi
+}
+
+load_modules() {
+  nvidia-modprobe >/dev/null 2>&1
+  modprobe -q mdev
+  # nvidia-modprobe does not load the vfio module and Unraid has no udev rule for it
+  modprobe nvidia-vgpu-vfio 2>/dev/null
+}
+
+daemons_stop() {
+  killall nvidia-vgpu-mgr 2>/dev/null
+  killall nvidia-vgpud 2>/dev/null
+  local n=0
+  while pgrep -x nvidia-vgpu-mgr >/dev/null || pgrep -x nvidia-vgpud >/dev/null; do
+    n=$((n + 1))
+    if [ ${n} -ge 10 ]; then
+      killall -9 nvidia-vgpu-mgr nvidia-vgpud 2>/dev/null
+      break
+    fi
+    sleep 1
+  done
+  # a stale pid file makes nvidia-vgpu-mgr fail with "Failed to open PID file: File exists"
+  rm -f /var/run/nvidia-vgpud/*.pid /var/run/nvidia-vgpu-mgr/*.pid 2>/dev/null
+}
+
+daemons_start() {
+  # clean stale pid files left over from a crashed daemon
+  pgrep -x nvidia-vgpud >/dev/null || rm -f /var/run/nvidia-vgpud/*.pid 2>/dev/null
+  pgrep -x nvidia-vgpu-mgr >/dev/null || rm -f /var/run/nvidia-vgpu-mgr/*.pid 2>/dev/null
+  # nvidia-vgpud is a oneshot that registers the vGPU types with the RM
+  log "Starting nvidia-vgpud"
+  LD_PRELOAD="${UNLOCK_LIB}" nvidia-vgpud
+  if ! pgrep -x nvidia-vgpu-mgr >/dev/null; then
+    log "Starting nvidia-vgpu-mgr"
+    LD_PRELOAD="${UNLOCK_LIB}" nvidia-vgpu-mgr
+  fi
+}
+
+wait_types() {
+  local t=0
+  while ! types_present; do
+    t=$((t + 1))
+    if [ ${t} -ge ${TYPES_TIMEOUT} ]; then
+      log "ERROR: no mdev types appeared after ${TYPES_TIMEOUT}s."
+      log "Check 'nvidia-vgpud' output in the syslog - if it logs 'GPU not supported by vGPU'"
+      log "your GPU is missing from vgpuConfig.xml. You can place a vgpuConfig.xml that"
+      log "contains your GPU (e.g. from a 16.x/535 driver for Pascal cards) at:"
+      log "  ${XML_OVERRIDE}"
+      log "and restart the vGPU services from the plugin page."
+      notify "No mdev types appeared - GPU may not be supported by the bundled vgpuConfig.xml. See the plugin page for details." "alert"
+      return 1
+    fi
+    sleep 1
+  done
+  return 0
+}
+
+device_running() {
+  [ -d "/sys/bus/mdev/devices/${1}" ]
+}
+
+apply_devices() {
+  [ -s "${DEVCFG}" ] || return 0
+  local uuid pci mtype rc=0
+  while IFS='|' read -r uuid pci mtype; do
+    case "${uuid}" in ''|\#*) continue ;; esac
+    if device_running "${uuid}"; then
+      continue
+    fi
+    mdevctl define -u "${uuid}" -p "${pci}" --type "${mtype}" 2>/dev/null
+    if mdevctl start -u "${uuid}" 2>/dev/null; then
+      log "Started vGPU ${uuid} (${mtype} on ${pci})"
+    else
+      log "ERROR: failed to start vGPU ${uuid} (${mtype} on ${pci})"
+      rc=1
+    fi
+  done < "${DEVCFG}"
+  return ${rc}
+}
+
+stop_devices() {
+  [ -s "${DEVCFG}" ] || return 0
+  local uuid pci mtype
+  while IFS='|' read -r uuid pci mtype; do
+    case "${uuid}" in ''|\#*) continue ;; esac
+    if device_running "${uuid}"; then
+      log "Stopping vGPU ${uuid}"
+      mdevctl stop -u "${uuid}" 2>/dev/null
+    fi
+  done < "${DEVCFG}"
+}
+
+do_start() {
+  if [ -z "$(installed_version)" ]; then
+    log "ERROR: no Nvidia vGPU driver installed for kernel ${KERNEL_V}"
+    return 1
+  fi
+  setup_config
+  load_modules
+  daemons_start
+  if wait_types; then
+    apply_devices
+  else
+    return 1
+  fi
+}
+
+do_stop() {
+  stop_devices
+  daemons_stop
+}
+
+install_pkg() {
+  local pkg="$1" newname db p
+  newname="$(basename "${pkg%.txz}")"
+  # drop other installed driver builds first (they are named nvidia-<version>,
+  # so a version change is a different Slackware package name)
+  for db in /var/log/packages /var/lib/pkgtools/packages; do
+    [ -d "${db}" ] || continue
+    for p in "${db}"/nvidia-[0-9]*; do
+      [ -e "${p}" ] || continue
+      [ "$(basename "${p}")" = "${newname}" ] && continue
+      removepkg "$(basename "${p}")" >/dev/null 2>&1
+    done
+  done
+  log "Installing driver package $(basename "${pkg}")"
+  /sbin/upgradepkg --install-new --reinstall "${pkg}" >/dev/null
+  depmod -a
+}
+
+# live driver reload: only possible while no VM holds a vGPU
+do_update() {
+  local pkg new
+  pkg="$(pkg_file)"
+  if [ -z "${pkg}" ]; then
+    log "ERROR: no downloaded driver package found for kernel ${KERNEL_V}"
+    return 1
+  fi
+  new="$(pkg_version)"
+  if [ "$(loaded_version)" = "${new}" ] && [ "$(installed_version)" = "${new}" ]; then
+    log "Driver v${new} is already installed and loaded"
+    do_start
+    return $?
+  fi
+  log "Live-installing driver v${new} (currently loaded: $(loaded_version || echo none))"
+  do_stop
+  if grep -qw '^nvidia' /proc/modules; then
+    modprobe -q -r nvidia_vgpu_vfio
+    modprobe -q -r nvidia_drm
+    modprobe -q -r nvidia_modeset
+    modprobe -q -r nvidia_uvm
+    rmmod nvidia 2>/dev/null
+  fi
+  if grep -qw '^nvidia' /proc/modules; then
+    log "ERROR: cannot unload the nvidia module (a VM is probably using a vGPU)."
+    log "The new driver was downloaded and will be installed on the next reboot."
+    notify "New vGPU driver downloaded but the old driver is in use. Stop your VMs and retry, or reboot to install." "alert"
+    do_start
+    return 1
+  fi
+  install_pkg "${pkg}"
+  if do_start; then
+    log "Driver v${new} installed and running - no reboot needed"
+    notify "Nvidia vGPU driver v${new} installed and running - no reboot needed"
+  else
+    return 1
+  fi
+}
+
+# boot / plugin-update entry point - never disruptive to running VMs
+do_ensure() {
+  local pkg
+  pkg="$(pkg_file)"
+  if [ -z "$(installed_version)" ]; then
+    if [ -z "${pkg}" ]; then
+      log "ERROR: no driver package available for kernel ${KERNEL_V}"
+      return 1
+    fi
+    install_pkg "${pkg}"
+  fi
+  if [ -z "$(loaded_version)" ]; then
+    do_start
+  elif [ -n "${pkg}" ] && [ "$(loaded_version)" != "$(pkg_version)" ]; then
+    do_update
+  else
+    # driver already loaded and current: just make sure the stack is healthy
+    setup_config
+    load_modules
+    if ! pgrep -x nvidia-vgpu-mgr >/dev/null || ! types_present; then
+      daemons_start
+    fi
+    if wait_types; then
+      apply_devices
+    else
+      return 1
+    fi
+  fi
+}
+
+do_status() {
+  local iv lv pv
+  iv="$(installed_version)"; lv="$(loaded_version)"; pv="$(pkg_version)"
+  echo "Kernel:            ${KERNEL_V}"
+  echo "Installed driver:  ${iv:-none}"
+  echo "Loaded driver:     ${lv:-not loaded}"
+  echo "Downloaded pkg:    ${pv:-none}"
+  echo "nvidia-vgpu-mgr:   $(pgrep -x nvidia-vgpu-mgr >/dev/null && echo running || echo stopped)"
+  echo "mdev types:        $(types_present && echo available || echo 'not available')"
+  echo "Configured vGPUs:"
+  if [ -s "${DEVCFG}" ]; then
+    local uuid pci mtype state
+    while IFS='|' read -r uuid pci mtype; do
+      case "${uuid}" in ''|\#*) continue ;; esac
+      device_running "${uuid}" && state="running" || state="stopped"
+      echo "  ${uuid}  ${pci}  ${mtype}  ${state}"
+    done < "${DEVCFG}"
+  else
+    echo "  (none)"
+  fi
+}
+
+case "$1" in
+  ensure)  do_ensure ;;
+  start)   do_start ;;
+  stop)    do_stop ;;
+  restart) do_stop; do_start ;;
+  update)  do_update ;;
+  apply)   setup_config; apply_devices ;;
+  status)  do_status ;;
+  *) echo "usage: $0 <ensure|start|stop|restart|update|apply|status>"; exit 1 ;;
+esac

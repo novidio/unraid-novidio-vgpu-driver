@@ -1,106 +1,92 @@
 #!/bin/bash
+# download.sh [version] - make sure the requested driver package for the running
+# kernel is present on the flash drive. "latest" (default) picks the newest build.
+# Called from the .plg on boot/install and from the plugin page before an update.
 
-# Define Variables
-export KERNEL_V="$(uname -r)"
-export PACKAGE="nvidia"
-export DRIVER_AVAIL="$(wget -qO- https://api.github.com/repos/novidio/unraid-novidio-vgpu-driver/releases/tags/${KERNEL_V} | jq -r '.assets[].name' | grep -E ${PACKAGE} | grep -E -v '\.md5$' | sort -V)"
-export BRANCHES="$(wget -qO- https://raw.githubusercontent.com/novidio/unraid-novidio-vgpu-driver/master/nvidia_vgpu_versions | grep -v "UPDATED")"
-export DL_URL="https://github.com/novidio/unraid-novidio-vgpu-driver/releases/download/${KERNEL_V}"
-export SET_DRV_V="$(grep "driver_version" "/boot/config/plugins/novidio-vgpu-driver/settings.cfg" | cut -d '=' -f2)"
-export CUR_V="$(ls -p /boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*} 2>/dev/null | grep -E -v '\.md5' | sort -V | tail -1)"
+PLUGIN="novidio-vgpu-driver"
+PLGCFG="/boot/config/plugins/${PLUGIN}"
+SETTINGS="${PLGCFG}/settings.cfg"
+KERNEL_V="$(uname -r)"
+PKGDIR="${PLGCFG}/packages/${KERNEL_V%%-*}"
+DL_URL="https://github.com/novidio/unraid-novidio-vgpu-driver/releases/download/${KERNEL_V}"
+API_URL="https://api.github.com/repos/novidio/unraid-novidio-vgpu-driver/releases/tags/${KERNEL_V}"
 
-#Download Nvidia vGPU Driver Package
-download() {
-if wget -q -nc --show-progress --progress=bar:force:noscroll -O "/boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}/${LAT_PACKAGE}" "${DL_URL}/${LAT_PACKAGE}" ; then
-  wget -q -nc --show-progress --progress=bar:force:noscroll -O "/boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}/${LAT_PACKAGE}.md5" "${DL_URL}/${LAT_PACKAGE}.md5"
-  if [ "$(md5sum /boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}/${LAT_PACKAGE} | awk '{print $1}')" != "$(cat /boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}/${LAT_PACKAGE}.md5 | awk '{print $1}')" ]; then
-    echo
-    echo "-----ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR------"
-    echo "--------------------------------CHECKSUM ERROR!---------------------------------"
-    rm -rf /boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}/${LAT_PACKAGE}
-    exit 1
+WANT="${1:-$(grep -m1 '^driver_version=' "${SETTINGS}" 2>/dev/null | cut -d '=' -f2)}"
+[ -n "${WANT}" ] || WANT="latest"
+
+mkdir -p "${PKGDIR}"
+LOCAL_PKG="$(ls "${PKGDIR}"/nvidia-*.txz 2>/dev/null | sort -V | tail -1)"
+
+md5_ok() {
+  [ -f "${1}" ] && [ -f "${1}.md5" ] || return 1
+  [ "$(md5sum "${1}" | awk '{print $1}')" = "$(awk '{print $1}' "${1}.md5")" ]
+}
+
+# list of available package assets for this kernel (may be empty when offline)
+AVAIL="$(wget -T 15 -qO- "${API_URL}" | jq -r '.assets[].name' 2>/dev/null | grep '^nvidia-' | grep -E -v '\.md5$' | sort -V)"
+
+if [ -z "${AVAIL}" ]; then
+  if [ -n "${LOCAL_PKG}" ]; then
+    echo "---Can't reach GitHub, using local driver package $(basename "${LOCAL_PKG}")---"
+    exit 0
   fi
   echo
-  echo "-----------Successfully downloaded Nvidia vGPU Driver Package v$(echo $LAT_PACKAGE | cut -d '-' -f3)-----------"
-else
-  echo
-  echo "---------------Can't download Nvidia vGPU Driver Package v$(echo $LAT_PACKAGE | cut -d '-' -f3)----------------"
+  echo "-----ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR------"
+  echo "----No driver package found for kernel ${KERNEL_V} and no local copy exists----"
+  echo "---Check your internet connection, or wait for a build for this kernel to be---"
+  echo "---------------published, then reinstall/update the plugin.--------------------"
   exit 1
 fi
-}
 
-#Check if driver is already downloaded
-check() {
-if ! ls -1 /boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}/ | grep -q "${PACKAGE}-$(echo $LAT_PACKAGE | cut -d '-' -f3)" ; then
-  echo
-  echo "+=============================================================================="
-  echo "| WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING"
-  echo "|"
-  echo "| Don't close this window with the red 'X' in the top right corner until the 'DONE' button is displayed!"
-  echo "|"
-  echo "| WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING"
-  echo "+=============================================================================="
-  echo
-  echo "----------------Downloading Nvidia vGPU Driver Package v$(echo $LAT_PACKAGE | cut -d '-' -f3)-----------------"
-  echo "---------This could take some time, please don't close this window!------------"
-  download
+# packages are named nvidia-<driver version>-<kernel>-Unraid-1.txz
+if [ "${WANT}" = "latest" ]; then
+  PKG="$(echo "${AVAIL}" | tail -1)"
+else
+  PKG="$(echo "${AVAIL}" | grep -- "-${WANT}-" | sort -V | tail -1)"
+  if [ -z "${PKG}" ]; then
+    echo "---Requested driver v${WANT} not found for this kernel, falling back to latest---"
+    PKG="$(echo "${AVAIL}" | tail -1)"
+    sed -i '/^driver_version=/c\driver_version=latest' "${SETTINGS}" 2>/dev/null
+  fi
+fi
+PKG_V="$(echo "${PKG}" | cut -d '-' -f2)"
+
+if md5_ok "${PKGDIR}/${PKG}"; then
+  echo "-------Nvidia vGPU driver package v${PKG_V} already downloaded, checksum OK-------"
 else
   echo
-  echo "---------Noting to do, Nvidia vGPU Drivers v$(echo $LAT_PACKAGE | cut -d '-' -f3) already downloaded!---------"
+  echo "+==============================================================================="
+  echo "| Downloading Nvidia vGPU driver package v${PKG_V} for kernel ${KERNEL_V}"
+  echo "| Please don't close this window until it is finished!"
+  echo "+==============================================================================="
   echo
-  echo "------------------------------Verifying CHECKSUM!------------------------------"
-  if [ "$(md5sum /boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}/${LAT_PACKAGE} | awk '{print $1}')" != "$(cat /boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}/${LAT_PACKAGE}.md5 | awk '{print $1}')" ]; then
-    rm -rf /boot/config/plugins/novidio-vgpu-driver/packages/${LAT_PACKAGE}
+  rm -f "${PKGDIR}/${PKG}" "${PKGDIR}/${PKG}.md5"
+  if wget -q --show-progress --progress=bar:force:noscroll -O "${PKGDIR}/${PKG}" "${DL_URL}/${PKG}" &&
+     wget -q -O "${PKGDIR}/${PKG}.md5" "${DL_URL}/${PKG}.md5" &&
+     md5_ok "${PKGDIR}/${PKG}"; then
     echo
-    echo "-----ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR-----"
-    echo "--------------------------------CHECKSUM ERROR!--------------------------------"
-    echo
-    echo "---------------Trying to redownload the Nvidia Vgpu Driver v$(echo $LAT_PACKAGE | cut -d '-' -f3)-------------"
-    echo
-    echo "+=============================================================================="
-    echo "| WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING"
-    echo "|"
-    echo "| Don't close this window with the red 'X' in the top right corner until the 'DONE' button is displayed!"
-    echo "|"
-    echo "| WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING - WARNING"
-    echo "+=============================================================================="
-    download
+    echo "----------Successfully downloaded Nvidia vGPU driver package v${PKG_V}----------"
   else
+    rm -f "${PKGDIR}/${PKG}" "${PKGDIR}/${PKG}.md5"
     echo
-    echo "----------------------------------CHECKSUM OK!---------------------------------"
-  fi
-  exit 0
-fi
-}
-
-if [ ! -d "/boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}" ]; then
-  mkdir -p "/boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}"
-fi
-
-if [ "${SET_DRV_V}" == "latest" ]; then
-  export LAT_PACKAGE="$(echo "$DRIVER_AVAIL" | tail -1)"
-  if [ -z "$LAT_PACKAGE" ]; then
-    if [ -z "${CUR_V}" ]; then
-      echo
-      echo "-----ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR------"
-      echo "---Can't get latest Nvidia driver version and found no installed local driver---"
-      echo "-----Please wait for an hour and try it again, if it then also fails please-----"
-      echo "------go to the Support Thread on the Unraid forums and make a post there!------"
-      exit 1
-    else
-      LAT_PACKAGE=$CUR_V
+    echo "-----ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR - ERROR------"
+    echo "-------Download or checksum of driver package v${PKG_V} failed!----------------"
+    if [ -n "${LOCAL_PKG}" ]; then
+      echo "---------Keeping existing local package $(basename "${LOCAL_PKG}")---------"
+      exit 0
     fi
+    exit 1
   fi
 fi
 
-#Begin Check
-check
-
-#Check for old packages that are not suitable for this Kernel and not suitable for the current Nvidia driver version
-rm -f $(ls -d /boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}/* 2>/dev/null | grep -v "${KERNEL_V%%-*}")
-rm -f $(ls /boot/config/plugins/novidio-vgpu-driver/packages/${KERNEL_V%%-*}/* 2>/dev/null | grep -v "$LAT_PACKAGE")
-
-#Display message to reboot server both in Plugin and WebUI
-echo
-echo "----To install the new Nvidia vGPU Driver v$(echo $LAT_PACKAGE | cut -d '-' -f3) please reboot your Server!----"
-/usr/local/emhttp/plugins/dynamix/scripts/notify -e "Nvidia vGPU Driver" -d "To install the new Nvidia vGPU Driver v$(echo $LAT_PACKAGE | cut -d '-' -f3) please reboot your Server!" -i "alert" -l "/Main"
+# remove packages for other kernels and older builds for this kernel
+for d in "${PLGCFG}/packages/"*/; do
+  [ "${d}" = "${PKGDIR}/" ] || rm -rf "${d}"
+done
+for f in "${PKGDIR}"/*; do
+  case "$(basename "${f}")" in
+    "${PKG}"|"${PKG}.md5") ;;
+    *) rm -f "${f}" ;;
+  esac
+done
+exit 0

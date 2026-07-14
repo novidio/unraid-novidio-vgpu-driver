@@ -1,305 +1,398 @@
 Menu="Utilities"
-Title="Novidio Vgpu Driver"
+Title="Novidio vGPU"
 Icon="nvidia-driver.png"
 ---
 <?php
-//Get selected driver version
-//$selected_v = shell_exec("/usr/local/emhttp/plugins/novidio-vgpu-driver/include/exec.sh get_selected_version");
+/* novidio-vgpu-driver settings page
+ * - status overview (driver / services / GPUs)
+ * - vGPU device manager (replaces the old user-scripts workflow)
+ * - settings + profile_override.toml editor
+ */
 
-//Update driver versions and create file '/tmp/novidio_vgpu_driver'
-shell_exec('/usr/local/emhttp/plugins/novidio-vgpu-driver/include/exec.sh update');
+$vgpu_plugin  = "novidio-vgpu-driver";
+$vgpu_emhttp  = "/usr/local/emhttp/plugins/$vgpu_plugin";
+$vgpu_cfgdir  = "/boot/config/plugins/$vgpu_plugin";
+$vgpu_devcfg  = "$vgpu_cfgdir/vgpu-devices.cfg";
+$vgpu_usercfg = "/boot/config/nvidia-vgpu";
+$vgpu_rc      = "$vgpu_emhttp/scripts/rc.vgpu";
+$override_toml = "$vgpu_usercfg/profile_override.toml";
 
-//Get latest version
-$latest_v = shell_exec('/usr/local/emhttp/plugins/novidio-vgpu-driver/include/exec.sh get_latest_version');
-
-//Get current installed driver version
-$installed_v = shell_exec('/usr/local/emhttp/plugins/novidio-vgpu-driver/include/exec.sh get_installed_version');
-
-//Get mdevctl list
-$mdev_list = shell_exec('/usr/local/emhttp/plugins/novidio-vgpu-driver/include/exec.sh get_mdev_list');
-
-//Read driver versions from '/tmp/novidio_vgpu_driver'
-error_reporting(E_ALL);
-ini_set('display_errors',1);
-
-//Get value from update check
-//$update_check = shell_exec("/usr/local/emhttp/plugins/novidio-vgpu-driver/include/exec.sh update_check");
-
-//$filename = "/tmp/novidio_vgpu_driver";
-//$eachlines = file($filename, FILE_IGNORE_NEW_LINES);
-?>
-
-<script>
-//Don't execute commands again if page is refreshed
-    if ( window.history.replaceState ) {
-        window.history.replaceState( null, null, window.location.href );
+function vgpu_setting($key, $default = "") {
+  // no parse_ini_file: it mangles unquoted true/false into "1"/""
+  global $vgpu_cfgdir;
+  $file = "$vgpu_cfgdir/settings.cfg";
+  if (is_file($file)) {
+    foreach (file($file, FILE_IGNORE_NEW_LINES) as $line) {
+      if (strpos($line, "$key=") === 0) return substr($line, strlen($key) + 1);
     }
-</script>
-
-<script>
-function changeVersion(form) {
-    var package = form.drv_version.value;
-    openBox("/usr/local/emhttp/plugins/novidio-vgpu-driver/include/exec.sh&arg1=update_version&arg2="+package,"Downloading Package",600,800,true);
-    return false;
-    }
-</script>
-
-<?
-$vars = parse_ini_file("/var/local/emhttp/var.ini");
-$toolTipsterAllowed = version_compare($vars['version'],"6.3.3",">=") ? "true" : "false";
-
-if (file_exists("$docroot/plugins/dynamix/include/Translations") ) {
-	require_once "$docroot/plugins/dynamix/include/Translations.php";
-	
-	$translationFile = "$docroot/languages/{$_SESSION['locale']}/".basename(strtolower($_SERVER['REQUEST_URI'])).".txt";
-	$genericFile     = "$docroot/languages/{$_SESSION['locale']}/translations.txt";
-	$pluginTranslations = @parse_lang_file($translationFile);
-	$genericTranslations = @parse_lang_file($genericFile);
-	$pluginTranslations = array_merge(is_array($genericTranslations) ? $genericTranslations : [],is_array($pluginTranslations) ? $pluginTranslations : [] );
-	$language = array_merge($pluginTranslations,$language);
-	if ( empty($language) ) 
-		$translations = false;
+  }
+  return $default;
 }
 
-function tr($string,$ret=false) {
-	if ( function_exists("_") )
-		$string =  _($string);
-	if ( $ret )
-		return $string;
-	else
-		echo $string;
+function vgpu_set_setting($key, $value) {
+  global $vgpu_cfgdir;
+  $file = "$vgpu_cfgdir/settings.cfg";
+  $lines = is_file($file) ? file($file, FILE_IGNORE_NEW_LINES) : [];
+  $found = false;
+  foreach ($lines as $i => $line) {
+    if (strpos($line, "$key=") === 0) { $lines[$i] = "$key=$value"; $found = true; }
+  }
+  if (!$found) $lines[] = "$key=$value";
+  file_put_contents($file, implode("\n", $lines)."\n");
 }
 
-function addCfg($filename) {
-  return "<option value='$filename'>$filename</option>";
+function vgpu_devices() {
+  global $vgpu_devcfg;
+  $out = [];
+  if (is_file($vgpu_devcfg)) {
+    foreach (file($vgpu_devcfg, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+      if ($line === '' || $line[0] === '#') continue;
+      $p = explode('|', $line);
+      if (count($p) >= 3) $out[] = ['uuid' => $p[0], 'pci' => $p[1], 'type' => $p[2]];
+    }
+  }
+  return $out;
 }
 
-function pluginScan($filename) {
-  global $o;
-  
-  $dirContents = array_diff(scandir($filename),array(".",".."));
-  foreach ($dirContents as $cfg ) {
-    if ( is_dir("$filename/$cfg") ) {
-      pluginScan("$filename/$cfg");
-      continue;
-    }
-    if ( (pathinfo($cfg,PATHINFO_EXTENSION) == "toml" ) || (pathinfo($cfg,PATHINFO_EXTENSION) == "cfg") || (pathinfo($cfg,PATHINFO_EXTENSION) == "conf") || (pathinfo($cfg,PATHINFO_EXTENSION) == "xml")  || (pathinfo($cfg,PATHINFO_EXTENSION) == "yaml") || (pathinfo($cfg,PATHINFO_EXTENSION) == "ini")) {
-      $o .= addCfg("$filename/$cfg");
-    }
+function vgpu_save_devices($devices) {
+  global $vgpu_devcfg;
+  $lines = ["# managed by the Novidio vGPU plugin page - UUID|PCI|TYPE"];
+  foreach ($devices as $d) $lines[] = "{$d['uuid']}|{$d['pci']}|{$d['type']}";
+  file_put_contents($vgpu_devcfg, implode("\n", $lines)."\n");
+}
+
+$valid_uuid = '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i';
+$valid_pci  = '/^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$/i';
+$valid_type = '/^[A-Za-z0-9_.\-]+$/';
+
+/* ---------- handle actions ---------- */
+$vgpu_msg = ""; $vgpu_err = "";
+if (!empty($_POST['vgpu_action'])) {
+  $uuid  = isset($_POST['uuid'])  ? strtolower(trim($_POST['uuid'])) : '';
+  $pci   = isset($_POST['pci'])   ? strtolower(trim($_POST['pci']))  : '';
+  $mtype = isset($_POST['mtype']) ? trim($_POST['mtype'])            : '';
+  switch ($_POST['vgpu_action']) {
+    case 'add_device':
+      if (!preg_match($valid_uuid, $uuid))      $vgpu_err = "Invalid UUID.";
+      elseif (!preg_match($valid_pci, $pci))    $vgpu_err = "Invalid PCI address.";
+      elseif (!preg_match($valid_type, $mtype)) $vgpu_err = "Invalid mdev type.";
+      else {
+        $devices = vgpu_devices();
+        foreach ($devices as $d) if ($d['uuid'] === $uuid) $vgpu_err = "A vGPU with this UUID already exists.";
+        if (!$vgpu_err) {
+          $devices[] = ['uuid' => $uuid, 'pci' => $pci, 'type' => $mtype];
+          vgpu_save_devices($devices);
+          shell_exec("mdevctl define -u ".escapeshellarg($uuid)." -p ".escapeshellarg($pci)." --type ".escapeshellarg($mtype)." 2>&1");
+          $start_out = shell_exec("mdevctl start -u ".escapeshellarg($uuid)." 2>&1");
+          $vgpu_msg = "vGPU $uuid added.";
+          if (is_dir("/sys/bus/mdev/devices/$uuid")) $vgpu_msg .= " Device is running.";
+          else $vgpu_err = "Device saved but could not be started: ".trim($start_out);
+        }
+      }
+      break;
+    case 'remove_device':
+      if (preg_match($valid_uuid, $uuid)) {
+        shell_exec("mdevctl stop -u ".escapeshellarg($uuid)." 2>/dev/null");
+        shell_exec("mdevctl undefine -u ".escapeshellarg($uuid)." 2>/dev/null");
+        vgpu_save_devices(array_values(array_filter(vgpu_devices(), fn($d) => $d['uuid'] !== $uuid)));
+        $vgpu_msg = "vGPU $uuid removed.";
+      }
+      break;
+    case 'start_device':
+      if (preg_match($valid_uuid, $uuid)) {
+        foreach (vgpu_devices() as $d) if ($d['uuid'] === $uuid) {
+          shell_exec("mdevctl define -u ".escapeshellarg($d['uuid'])." -p ".escapeshellarg($d['pci'])." --type ".escapeshellarg($d['type'])." 2>/dev/null");
+          $start_out = shell_exec("mdevctl start -u ".escapeshellarg($d['uuid'])." 2>&1");
+          if (is_dir("/sys/bus/mdev/devices/$uuid")) $vgpu_msg = "vGPU $uuid started.";
+          else $vgpu_err = "Could not start $uuid: ".trim($start_out);
+        }
+      }
+      break;
+    case 'stop_device':
+      if (preg_match($valid_uuid, $uuid)) {
+        shell_exec("mdevctl stop -u ".escapeshellarg($uuid)." 2>&1");
+        $vgpu_msg = "vGPU $uuid stopped.";
+      }
+      break;
+    case 'save_settings':
+      $unlock = (isset($_POST['unlock']) && $_POST['unlock'] === 'true') ? 'true' : 'false';
+      $upd    = (isset($_POST['update_check']) && $_POST['update_check'] === 'true') ? 'true' : 'false';
+      $unlock_changed = (vgpu_setting('unlock', 'false') !== $unlock);
+      vgpu_set_setting('unlock', $unlock);
+      shell_exec("$vgpu_emhttp/include/exec.sh change_update_check ".escapeshellarg($upd));
+      $vgpu_msg = "Settings saved.";
+      if ($unlock_changed) $vgpu_msg .= " The vGPU unlock setting takes effect after 'Restart vGPU Services'.";
+      break;
+    case 'save_override':
+      if (!is_dir($vgpu_usercfg)) mkdir($vgpu_usercfg, 0755, true);
+      $content = str_replace("\r", "", $_POST['override_content'] ?? '');
+      file_put_contents($override_toml, $content);
+      shell_exec(escapeshellarg($vgpu_rc)." apply 2>/dev/null");
+      $vgpu_msg = "profile_override.toml saved. Restart the vGPU services (and your VM) for changes to take effect.";
+      break;
   }
 }
 
-$o = "<option value='' selected'>".tr("Select File",true)."</option>";
-pluginScan("/etc/vgpu_unlock");
-?>
+/* ---------- gather status ---------- */
+shell_exec("$vgpu_emhttp/include/exec.sh update");
 
-<script src="<?=autov("/webGui/javascript/jquery.filetree.js")?>"></script>
-<script>
-var caURL = '/plugins/novidio-vgpu-driver/include/exec.php';
+$kernel      = trim(shell_exec("uname -r"));
+$unraid_v    = trim(shell_exec("cut -d '\"' -f2 /etc/unraid-version"));
+$installed_v = trim(shell_exec("modinfo -F version nvidia 2>/dev/null | head -1"));
+$loaded_v    = trim(@file_get_contents("/sys/module/nvidia/version"));
+$latest_v    = trim(shell_exec("$vgpu_emhttp/include/exec.sh get_latest_version"));
+$mgr_running = trim(shell_exec("pgrep -x nvidia-vgpu-mgr 2>/dev/null")) !== '';
+$update_avail = ($latest_v && $installed_v && version_compare($latest_v, $installed_v, '>'));
 
-function editfile() {
-  var filename = $("#file").val();
-  $("#source").val(filename);
-  editfilemanual();
+/* NVIDIA GPUs + their mdev types straight from sysfs */
+$gpus = []; $gpu_types = []; $types_present = false;
+foreach (glob("/sys/bus/pci/devices/*") as $dev) {
+  $vendor = trim(@file_get_contents("$dev/vendor"));
+  $class  = trim(@file_get_contents("$dev/class"));
+  if ($vendor !== "0x10de" || strpos($class, "0x03") !== 0) continue;
+  $pci  = basename($dev);
+  $name = trim(shell_exec("lspci -s ".escapeshellarg(substr($pci, 5))." 2>/dev/null | cut -d ':' -f3-"));
+  $gpus[$pci] = $name ?: "NVIDIA GPU";
+  $gpu_types[$pci] = [];
+  foreach (glob("$dev/mdev_supported_types/*") as $tdir) {
+    $types_present = true;
+    $gpu_types[$pci][] = [
+      'type'  => basename($tdir),
+      'name'  => trim(@file_get_contents("$tdir/name")),
+      'avail' => trim(@file_get_contents("$tdir/available_instances")),
+    ];
+  }
+  usort($gpu_types[$pci], fn($a, $b) => strnatcmp($a['name'], $b['name']));
 }
 
-function editfilemanual() {
-  var filename = $("#source").val();
-  if ( ! filename ) {
-    $(".edits").prop("disabled",true);
+$devices = vgpu_devices();
+foreach ($devices as &$d) $d['running'] = is_dir("/sys/bus/mdev/devices/{$d['uuid']}");
+unset($d);
+
+$unlock_on    = vgpu_setting('unlock', 'false') === 'true';
+$upd_check_on = vgpu_setting('update_check', 'true') === 'true';
+$override_content = is_file($override_toml) ? file_get_contents($override_toml) : "";
+$xml_override_present = is_file("$vgpu_usercfg/vgpuConfig.xml");
+$new_uuid = trim(shell_exec("uuidgen 2>/dev/null")) ?: sprintf('%04x%04x-%04x-4%03x-%04x-%04x%04x%04x',
+  mt_rand(0,0xffff), mt_rand(0,0xffff), mt_rand(0,0xffff), mt_rand(0,0xfff),
+  mt_rand(0x8000,0xbfff), mt_rand(0,0xffff), mt_rand(0,0xffff), mt_rand(0,0xffff));
+?>
+
+<script>
+// avoid re-posting actions on page refresh
+if (window.history.replaceState) window.history.replaceState(null, null, window.location.href);
+
+var gpuTypes = <?= json_encode($gpu_types) ?>;
+
+function fillTypes() {
+  var pci = document.getElementById('add_pci').value;
+  var sel = document.getElementById('add_type');
+  sel.innerHTML = '';
+  var types = gpuTypes[pci] || [];
+  if (!types.length) {
+    sel.add(new Option('-- no mdev types available on this GPU --', ''));
     return;
   }
-  $(".choosers").prop("disabled",true);
-  $("#editing").html(filename);
-  $("#spinner").show();
-  $.post(caURL,{action:'edit',filename:filename},function(data) {
-    if (data) {
-      $("#spinner").hide();
-      var filedata = JSON.parse(data);
-      if ( filedata.format == "dos" ) {
-        $("#formatDiv").addClass("dosFormat");
-      } else {
-        $("#formatDiv").removeClass("dosFormat");
-      }
-      setFormatButton();
-      if ( filedata.error == "true" ) {    
-        $("#formatLine").hide();
-        $(".edits,.editButton,#editarea").prop("disabled",true);
-        $("#editarea").val("<?tr("Error reading file");?>");
-        $("#donebutton,.choosers").prop("disabled",false);
-      } else { 
-        $("#formatLine").show();
-        $("#editarea").val(filedata.contents);
-        $("#editarea").attr("data-orig",filedata.contents);
-        $(".edits,#cancelbutton").prop("disabled",false);
-        $(".editButton,#donebutton").prop("disabled",true);
-      }
-    }
-  });
-  $("#backup").html("<?tr("No Backup File Found");?>");
-  $.post(caURL,{action:'getBackup',filename:filename},function(data) {
-    if (data) {
-      $("#backup").html(data);
-      $("#backup").val(data);
-    }
-  });    
-}
-
-function cancelEdit() {
-  var orig = $("#editarea").attr("data-orig");
-  $("#editarea").val(orig);
-  $("#file").val("");
-  $("#formatLine").hide();
-  $(".choosers,#donebutton").prop("disabled",false);
-  $("#cancelbutton,.edits").prop("disabled",true);
-}
-
-function saveEdits() {
-  var filedata = new Object;
-  filedata.filename = $("#editing").html();
-  filedata.contents = $("#editarea").val();
-  filedata.format = $("#formatDiv").hasClass("dosFormat");
-  $("#spinner").show();
-  $.post(caURL,{action:'save',filedata:filedata},function(data) {
-    if (data) {
-      $("#file").val("");
-      $("#formatLine,#spinner").hide();
-      $(".choosers,#donebutton").prop("disabled",false);
-      $("#cancelbutton,.edits").prop("disabled",true);
-    }
+  types.forEach(function(t) {
+    var label = t.name + ' (' + t.type + ', ' + t.avail + ' left)';
+    sel.add(new Option(label, t.type));
   });
 }
 
-function toggleFormat() {
-  $(".ca-switch-button-button").toggleClass("dosFormat");
-  setFormatButton();
+function genUUID() {
+  var u = ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
+  document.getElementById('add_uuid').value = u;
 }
 
-function setFormatButton() {
-  if ( $(".ca-switch-button-button").hasClass("dosFormat") ) {
-    $(".ca-switch-button-button").css("left","12px");
-    $("#format").html("DOS (crlf)");
-  } else {
-    $(".ca-switch-button-button").css("left","0px");
-    $("#format").html("Linux (cr)");
-  }
-  $(".editButton").prop("disabled",false);
+function vgpuAction(action, uuid) {
+  var f = document.getElementById('vgpu_action_form');
+  f.vgpu_action.value = action;
+  f.uuid.value = uuid;
+  if (action === 'remove_device' && !confirm('Remove this vGPU device? Make sure no VM is using it.')) return;
+  f.submit();
+}
+
+function toggleXML(id) {
+  var el = document.getElementById(id);
+  el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+}
+
+function copyXML(id) {
+  var txt = document.getElementById(id).innerText;
+  navigator.clipboard.writeText(txt).then(function(){ /* ok */ });
+}
+
+function restartServices() {
+  openBox('/plugins/novidio-vgpu-driver/include/exec.sh&arg1=restart_services', 'Restarting vGPU Services', 600, 900, true);
+}
+
+function updateDriver() {
+  openBox('/plugins/novidio-vgpu-driver/include/exec.sh&arg1=update_driver&arg2=latest', 'Updating Nvidia vGPU Driver', 600, 900, true);
 }
 </script>
 
-<h1 style="text-align: center;"><a href="https://forums.unraid.net/" target="_blank" rel="noopener"><span style="color: green;">Nvidia vGPU Driver Package</span></a></h1>
-
-<div style="width: 50%; float:left">
-    <div id="title">
-        <span class="left"></span>
-    </div>
-    <table class="settings" style="margin-top: 0;">
-        <tr>
-            <td><b><font size="+1">nVidia vgpu Info:</font></b></td>
-        </tr>
-        <tr>
-            <td>Nvidia vgpu Driver Version:</td>
-            <td style="color:green"><b><?=`nvidia-smi | grep "Driver Version" | cut -d ' ' -f3`?></b></td>
-        </tr>
-        <tr>
-            <td>Installed GPU(s):</td>
-            <td style="color:green"><b><?=`nvidia-smi --query-gpu=index,name,gpu_bus_id,uuid --format=csv,noheader | tr "," "\n" | sed 's/^[ \t]*//' | sed -e s/00000000://g | sed '0~4G' | sed 's/^[0-9]$/&:/' | sed 's/$/<br>/'`?></b></td>
-        </tr>
-
-        <tr>
-            <td>Mdevctl List:</td>
-				<? if ($mdev_list !== ''): ?>
-					<td style="color:green"><b><?=`mdevctl list | sed 's/$/<br>/'`?></b></td>				
-				<? else: ?>
-					<td style="color:red">Cannot get MDEV LIST !</td>
-				<? endif; ?>
-        </tr>
-    </table>
-</div>
-
-<div style="width: 50%; float:right">
-    <div id="title">
-        <span class="right"></span>
-    </div>
-    <table class="settings" style="margin-top: 0;">
-        <tr>
-            <b><font size="+1">Mdevctl types:</font></b>
-        </tr>
-        <tr>
-			<td style="color:green">
-                <div>
-                    <b><?=`mdevctl types | sed 's/^[ \t]*//' | sed 's/$/<br>/'`?></b>
-                </div>
-            </td>
-		</tr>
-	</table>
-</div>
-
-<div style="width: 50%; float:left">
-    <div id="title">
-        <span class="left"></span>
-    </div>
-    <table class="settings" style="margin-top: 0;">
-        <tr>
-            <td><b><font size="+1">System Info</font></b></td>
-        </tr>
-        <tr>
-            <td>Unraid Version:</td>
-            <td style="color: #99cc00;"><b><?=`cat /etc/unraid-version | cut -d '"' -f2`?></b></td>
-        </tr>
-        <tr>
-            <td>Kernel:</td>
-            <td style="color: #99cc00;"><b><?=`uname -r`?></b></td>
-        </tr>
-        <tr>
-        </tr>
-    </table>
-  </div>
-
-<div style="width: 50%; float:left">
-    <div id="title">
-        <span class="left"></span>
-    </div>
-    <table class="settings" style="margin-top: 0;">
-        <tr>
-
 <style>
-.txtdiv {display:inline-block;}
-.txtarea {resize:both;border:1px solid red;width:600px;height:300px;font-family:monospace;}
-.fileTree{width:305px;max-height:150px;overflow:scroll;position:absolute;z-index:100;display:none;color:initial;}
-table {background-color:transparent;}
-table tbody td {line-height:1.4rem;}
+.vgpu-panel {background: var(--background-alt, rgba(125,125,125,.08)); border: 1px solid rgba(125,125,125,.25); border-radius: 6px; padding: 12px 16px; margin-bottom: 18px;}
+.vgpu-panel h3 {margin: 0 0 10px 0;}
+.vgpu-status td {padding: 2px 18px 2px 0; line-height: 1.6rem;}
+.vgpu-ok {color: #4caf50; font-weight: bold;}
+.vgpu-bad {color: #ef5350; font-weight: bold;}
+.vgpu-warn {color: #ffa726; font-weight: bold;}
+.vgpu-table {width: 100%; border-collapse: collapse; margin-top: 6px;}
+.vgpu-table th {text-align: left; padding: 4px 10px; border-bottom: 1px solid rgba(125,125,125,.35);}
+.vgpu-table td {padding: 6px 10px; border-bottom: 1px solid rgba(125,125,125,.15); font-family: bitstream, monospace;}
+.vgpu-banner {border-radius: 6px; padding: 10px 14px; margin-bottom: 14px;}
+.vgpu-banner.err {background: rgba(239,83,80,.15); border: 1px solid #ef5350;}
+.vgpu-banner.msg {background: rgba(76,175,80,.12); border: 1px solid #4caf50;}
+.vgpu-banner.warn {background: rgba(255,167,38,.12); border: 1px solid #ffa726;}
+.vgpu-xml {display: none; background: rgba(0,0,0,.25); padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 1.1rem;}
+.vgpu-addform td {padding: 4px 10px;}
+.vgpu-mono {font-family: bitstream, monospace;}
+#override_area {width: 100%; max-width: 900px; height: 220px; font-family: bitstream, monospace;}
 </style>
-<link type="text/css" rel="stylesheet" href="<?=autov('/webGui/styles/jquery.filetree.css')?>">
-<link type="text/css" rel="stylesheet" href="<?=autov('/plugins/novidio-vgpu-driver/styles/switchbutton.css')?>">
 
-<span id='debugging'></span>
-<?tr("Select a file to edit: ");?>
-<select class='choosers' id='file' onchange='editfile();'><?=$o?></select> or <input class='choosers' type='text' id="source" name="shareFolder" value="/" data-pickroot="/"><font size='5'><i style='vertical-align:middle;cursor:pointer;' onclick='editfilemanual();' class="fa fa-pencil-square-o" aria-hidden="true"></i></font>  <?tr("note: editing a binary file could have unintended consequences");?><span id='spinner' style='display:none;'><img width='25px' src='/plugins/novidio-vgpu-driver/images/spinner2.gif'></span>
-<div width:100%;>
-<div class='txtdiv'>
-<center><?tr("Editing");?>: <span id='editing'><?tr("No file selected");?></span></center>
-<textarea wrap='off' class='edits txtarea' id='editarea' oninput='$(".editButton").prop("disabled",false);'></textarea>
+<form id="vgpu_action_form" method="POST" style="display:none">
+  <input type="hidden" name="vgpu_action" value="">
+  <input type="hidden" name="uuid" value="">
+</form>
+
+<?php if ($vgpu_err): ?><div class="vgpu-banner err"><i class="fa fa-exclamation-triangle"></i> <?= htmlspecialchars($vgpu_err) ?></div><?php endif; ?>
+<?php if ($vgpu_msg): ?><div class="vgpu-banner msg"><i class="fa fa-check"></i> <?= htmlspecialchars($vgpu_msg) ?></div><?php endif; ?>
+
+<?php if (!$installed_v): ?>
+<div class="vgpu-banner err"><i class="fa fa-exclamation-triangle"></i>
+No Nvidia vGPU driver is installed for kernel <b><?= htmlspecialchars($kernel) ?></b>.
+If a build exists for this kernel it is installed automatically at boot; otherwise check the
+<a href="https://github.com/novidio/unraid-novidio-vgpu-driver/releases" target="_blank">releases page</a>.
 </div>
-<div class='txtdiv'>
-<center><?tr("Backup File");?></center>
-<textarea wrap='off' class='txtarea' id='backup' disabled></textarea>
+<?php elseif (!$types_present): ?>
+<div class="vgpu-banner warn"><i class="fa fa-exclamation-triangle"></i>
+The driver is installed but <b>no vGPU mdev types are available</b>. Usually this means <code>nvidia-vgpud</code>
+rejected your GPU ("GPU not supported by vGPU" in the syslog) because it is missing from the bundled
+<code>vgpuConfig.xml</code>. For older cards (e.g. Pascal / Tesla P4) place a <code>vgpuConfig.xml</code> from a
+driver branch that still supports them (16.x / 535) at <code class="vgpu-mono">/boot/config/nvidia-vgpu/vgpuConfig.xml</code>
+<?= $xml_override_present ? "<b>(override file found - it is applied on service start)</b>" : "" ?>
+and click <b>Restart vGPU Services</b> below.
 </div>
+<?php endif; ?>
+
+<?php if ($update_avail): ?>
+<div class="vgpu-banner warn"><i class="fa fa-download"></i>
+Driver <b>v<?= htmlspecialchars($latest_v) ?></b> is available (installed: v<?= htmlspecialchars($installed_v) ?>).
+Installing live only works while no VM is using a vGPU.
+<input type="button" value="Update Now" onclick="updateDriver()" style="margin-left:12px">
 </div>
-<div>
-<div id='formatLine' style='display:none;'><div class='ca_tooltip ca-switch-button-background' style='width:25px; height:11px;' onclick='toggleFormat();' title='<?tr("Generally, it is not recommended to change the format");?>'><div id='formatDiv' class='ca-switch-button-button' style='width:12px; height:11px; left:11px;'></div></div>
-<?tr("File Format");?>: <font color='purple'><span id='format'></span></font></div></div>
-<input type='button' id='cancelbutton' value='<?tr("Cancel");?>' onclick='cancelEdit();' disabled><input class='edits editButton' type='button' value='<?tr("Apply");?>' onclick='saveEdits();'><input id='donebutton' type='button' value='<?tr("Done");?>' onclick='done();'>
-<span id='debugging'></span>
-</tr>
+<?php endif; ?>
+
+<div class="vgpu-panel">
+<h3><i class="fa fa-info-circle"></i> Status</h3>
+<table class="vgpu-status">
+<tr><td>Driver installed:</td><td><?= $installed_v ? "<span class='vgpu-ok'>v".htmlspecialchars($installed_v)."</span>" : "<span class='vgpu-bad'>none</span>" ?></td>
+    <td>Unraid:</td><td><?= htmlspecialchars($unraid_v) ?></td></tr>
+<tr><td>Driver loaded:</td><td><?= $loaded_v ? "<span class='vgpu-ok'>v".htmlspecialchars($loaded_v)."</span>" : "<span class='vgpu-bad'>not loaded</span>" ?></td>
+    <td>Kernel:</td><td><?= htmlspecialchars($kernel) ?></td></tr>
+<tr><td>Latest available:</td><td><?= $latest_v ? "v".htmlspecialchars($latest_v) : "unknown" ?></td>
+    <td>vGPU unlock:</td><td><?= $unlock_on ? "<span class='vgpu-warn'>enabled (spoofing)</span>" : "disabled (native profiles)" ?></td></tr>
+<tr><td>nvidia-vgpu-mgr:</td><td><?= $mgr_running ? "<span class='vgpu-ok'>running</span>" : "<span class='vgpu-bad'>stopped</span>" ?></td>
+    <td>mdev types:</td><td><?= $types_present ? "<span class='vgpu-ok'>available</span>" : "<span class='vgpu-bad'>not available</span>" ?></td></tr>
+<?php foreach ($gpus as $pci => $name): ?>
+<tr><td>GPU:</td><td colspan="3"><span class="vgpu-mono"><?= htmlspecialchars($pci) ?></span> - <?= htmlspecialchars($name) ?></td></tr>
+<?php endforeach; ?>
 </table>
+<div style="margin-top:10px">
+  <input type="button" value="Restart vGPU Services" onclick="restartServices()">
+</div>
 </div>
 
+<div class="vgpu-panel">
+<h3><i class="fa fa-clone"></i> vGPU Devices</h3>
+<p>These devices are created automatically at every boot - no user script needed. Assign one to a VM by
+adding the hostdev XML (click <i class="fa fa-code"></i>) to the VM's XML template.</p>
 
-<?php
-if(isset($_POST['changeUPDcheck'])) {
-$updata_check_selected = $_POST["updata_check_selected"];
-shell_exec("/usr/local/emhttp/plugins/novidio-vgpu-driver/include/exec.sh change_update_check ".escapeshellarg($updata_check_selected)."");
-echo '<script>parent.window.location.reload();</script>';
-}
-?>
+<table class="vgpu-table">
+<tr><th>UUID</th><th>GPU</th><th>Profile</th><th>Status</th><th style="width:220px">Actions</th></tr>
+<?php if (!$devices): ?>
+<tr><td colspan="5"><i>No vGPU devices configured yet - add one below.</i></td></tr>
+<?php endif; ?>
+<?php foreach ($devices as $i => $d): $xmlid = "xml$i"; ?>
+<tr>
+  <td><?= htmlspecialchars($d['uuid']) ?></td>
+  <td><?= htmlspecialchars($d['pci']) ?></td>
+  <td><?= htmlspecialchars($d['type']) ?><?php
+      foreach ($gpu_types[$d['pci']] ?? [] as $t) if ($t['type'] === $d['type'] && $t['name']) echo " (".htmlspecialchars($t['name']).")";
+  ?></td>
+  <td><?= $d['running'] ? "<span class='vgpu-ok'>running</span>" : "<span class='vgpu-bad'>stopped</span>" ?></td>
+  <td>
+    <?php if ($d['running']): ?>
+      <input type="button" value="Stop" onclick="vgpuAction('stop_device','<?= $d['uuid'] ?>')">
+    <?php else: ?>
+      <input type="button" value="Start" onclick="vgpuAction('start_device','<?= $d['uuid'] ?>')">
+    <?php endif; ?>
+    <input type="button" value="Remove" onclick="vgpuAction('remove_device','<?= $d['uuid'] ?>')">
+    <i class="fa fa-code" style="cursor:pointer" title="Show VM XML" onclick="toggleXML('<?= $xmlid ?>')"></i>
+  </td>
+</tr>
+<tr><td colspan="5" style="border-bottom:none;padding:0">
+<pre class="vgpu-xml" id="<?= $xmlid ?>">&lt;hostdev mode='subsystem' type='mdev' managed='no' model='vfio-pci' display='off' ramfb='off'&gt;
+  &lt;source&gt;
+    &lt;address uuid='<?= $d['uuid'] ?>'/&gt;
+  &lt;/source&gt;
+&lt;/hostdev&gt;<br><input type="button" value="Copy" onclick="copyXML('<?= $xmlid ?>')"></pre>
+</td></tr>
+<?php endforeach; ?>
+</table>
+
+<h4>Add a vGPU</h4>
+<form method="POST">
+<input type="hidden" name="vgpu_action" value="add_device">
+<table class="vgpu-addform">
+<tr><td>GPU:</td><td>
+  <select id="add_pci" name="pci" onchange="fillTypes()">
+  <?php foreach ($gpus as $pci => $name): ?>
+    <option value="<?= htmlspecialchars($pci) ?>"><?= htmlspecialchars("$pci - $name") ?></option>
+  <?php endforeach; ?>
+  </select>
+</td></tr>
+<tr><td>Profile:</td><td><select id="add_type" name="mtype" style="min-width:340px"></select></td></tr>
+<tr><td>UUID:</td><td>
+  <input type="text" id="add_uuid" name="uuid" size="40" class="vgpu-mono" value="<?= htmlspecialchars($new_uuid) ?>">
+  <i class="fa fa-refresh" style="cursor:pointer" title="Generate new UUID" onclick="genUUID()"></i>
+</td></tr>
+<tr><td></td><td><input type="submit" value="Add vGPU" <?= $types_present ? "" : "disabled" ?>>
+<?= $types_present ? "" : "<i>(no mdev types available - fix the warning above first)</i>" ?></td></tr>
+</table>
+</form>
+<script>fillTypes();</script>
+</div>
+
+<div class="vgpu-panel">
+<h3><i class="fa fa-cog"></i> Settings</h3>
+<form method="POST">
+<input type="hidden" name="vgpu_action" value="save_settings">
+<table class="vgpu-status">
+<tr><td>vGPU unlock (spoof consumer GPU as vGPU-capable):</td><td>
+  <select name="unlock">
+    <option value="false" <?= $unlock_on ? "" : "selected" ?>>Disabled - native vGPU profiles (Tesla / Quadro)</option>
+    <option value="true" <?= $unlock_on ? "selected" : "" ?>>Enabled - vgpu_unlock spoofing (consumer GPUs)</option>
+  </select>
+</td></tr>
+<tr><td>Check daily for driver updates:</td><td>
+  <select name="update_check">
+    <option value="true" <?= $upd_check_on ? "selected" : "" ?>>Yes</option>
+    <option value="false" <?= $upd_check_on ? "" : "selected" ?>>No</option>
+  </select>
+</td></tr>
+<tr><td></td><td><input type="submit" value="Apply"></td></tr>
+</table>
+</form>
+
+<h4>profile_override.toml</h4>
+<p>Optional <a href="https://github.com/mbilker/vgpu_unlock-rs#readme" target="_blank">vgpu_unlock-rs profile overrides</a>
+(framebuffer size, display heads, cuda, etc.). Stored on the flash drive and applied at every boot.</p>
+<form method="POST">
+<input type="hidden" name="vgpu_action" value="save_override">
+<textarea id="override_area" name="override_content" spellcheck="false"><?= htmlspecialchars($override_content) ?></textarea><br>
+<input type="submit" value="Save Overrides">
+</form>
+</div>
